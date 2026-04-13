@@ -3,13 +3,14 @@
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-一个功能强大的Python市场模拟库，支持交易机器人、债券交易对、股份公司系统和实时GUI可视化。
+一个功能强大的Python市场模拟库，支持交易机器人、债券交易对、股份公司系统、治理投票系统和实时GUI可视化。
 
 ## 功能特性
 
 - **市场模拟引擎**：完整的市场模拟系统，支持多种交易对和债券
 - **债券交易系统**：支持债券发行、交易和利息结算
 - **股份公司系统**：支持IPO发行、股份代币创建、一级市场交易、增发股份和分红
+- **治理投票系统**：支持加权投票、多选项治理提案、参与率检查
 - **手续费系统**：支持Maker/Taker费率、自定义手续费接收者
 - **实时GUI界面**：使用PyQt5构建的实时K线图和交易界面
 - **玩家模式**：支持人类玩家参与市场交易
@@ -154,6 +155,57 @@ for holder, amount in dividend_record.items():
     print(f"{holder.name} 获得分红: {amount} USDT")
 ```
 
+### 治理投票示例
+
+```python
+from core import get_engine, GovernanceProposal, GovernanceSystem
+
+engine = get_engine()
+
+# 创建股东
+shareholder1 = engine.create_trader("Shareholder1")
+shareholder2 = engine.create_trader("Shareholder2")
+shareholder3 = engine.create_trader("Shareholder3")
+
+# 创建治理提案（加权投票）
+proposal = GovernanceProposal(
+    title="是否增发100万股",
+    description="公司计划增发100万股用于扩张",
+    creator=shareholder1,
+    options=["同意", "反对", "弃权"],
+    participants={
+        shareholder1: 0.5,   # 50% 权重
+        shareholder2: 0.3,   # 30% 权重
+        shareholder3: 0.2    # 20% 权重
+    },
+    min_participation_rate=0.6  # 最低60%参与率
+)
+
+# 投票
+proposal.cast_vote(shareholder1, "同意")
+proposal.cast_vote(shareholder2, "同意")
+proposal.cast_vote(shareholder3, "反对")
+
+# 统计结果
+result = proposal.tally_votes()
+print(f"获胜选项: {result['winner']}")
+print(f"参与率: {result['participation_rate']:.2%}")
+print(f"是否有效: {result['is_valid']}")
+
+# 使用治理系统管理多个提案
+governance = GovernanceSystem()
+prop1 = governance.create_proposal(
+    title="预算审批",
+    description="Q2预算100万",
+    creator=shareholder1,
+    options=["同意", "反对"],
+    participants={shareholder1: 0.6, shareholder2: 0.4}
+)
+
+# 获取活跃提案
+active_proposals = governance.get_active_proposals()
+```
+
 ### 手续费系统示例
 
 ```python
@@ -275,6 +327,62 @@ class Corp(Trader):
     def get_circulating_shares(self, all_traders: List[Trader]) -> float
 ```
 
+### GovernanceProposal
+
+治理提案类，用于创建和管理投票。
+
+```python
+class GovernanceProposal:
+    def __init__(
+        self,
+        title: str,
+        description: str,
+        creator: Trader,
+        options: List[str],
+        participants: Dict[Trader, float],
+        end_time: Optional[datetime] = None,
+        min_participation_rate: float = 0.0,
+        proposal_id: Optional[str] = None
+    )
+    
+    # 投票
+    def cast_vote(self, voter: Trader, option: str) -> bool
+    def change_vote(self, voter: Trader, new_option: str) -> bool
+    
+    # 统计
+    def tally_votes(self) -> Dict[str, Any]
+    def get_voter_choice(self, voter: Trader) -> Optional[str]
+    def has_voted(self, voter: Trader) -> bool
+    def get_pending_voters(self) -> List[Trader]
+    
+    # 状态管理
+    def close_voting(self) -> None
+    def execute(self) -> None
+```
+
+### GovernanceSystem
+
+治理系统类，管理多个治理提案。
+
+```python
+class GovernanceSystem:
+    def __init__(self)
+    
+    # 创建提案
+    def create_proposal(self, title: str, description: str, creator: Trader,
+                       options: List[str], participants: Dict[Trader, float], ...) -> GovernanceProposal
+    
+    # 查询
+    def get_proposal(self, proposal_id: str) -> Optional[GovernanceProposal]
+    def get_all_proposals(self) -> List[GovernanceProposal]
+    def get_active_proposals(self) -> List[GovernanceProposal]
+    def get_proposals_by_status(self, status: VoteStatus) -> List[GovernanceProposal]
+    def get_proposals_by_participant(self, participant: Trader) -> List[GovernanceProposal]
+    
+    # 管理
+    def close_expired_proposals(self) -> List[GovernanceProposal]
+```
+
 ### FeeConfig
 
 手续费配置类。
@@ -354,6 +462,13 @@ class LiquidationEngine:
 - **买单（buy）**：借出资金，支付代币，获得**正债券**（债权）
 - **卖单（sell）**：借入资金，获得代币，获得**负债券**（债务）
 
+**治理投票规则：**
+- **加权投票**：不同参与者可以有不同的投票权重，权重总和必须等于1
+- **多选项支持**：支持二元投票或多元选择
+- **参与率检查**：可设置最低参与率要求，未达到则投票无效
+- **投票修改**：在投票结束前可以修改投票选择
+- **自动过期**：支持设置投票截止时间，到期自动关闭
+
 ## 项目结构
 
 ```
@@ -365,6 +480,7 @@ pyMarket/
 │   ├── bond_pair.py       # 债券交易对
 │   ├── trader.py          # 交易者
 │   ├── corp.py            # 股份公司
+│   ├── governance.py      # 治理投票系统
 │   ├── liquidation.py     # 破产清算系统
 │   ├── fees.py            # 手续费系统
 │   ├── order.py           # 订单系统

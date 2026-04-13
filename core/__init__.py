@@ -50,6 +50,12 @@ from .fees import (
     FeeDirection,
     FeeType,
 )
+from .governance import (
+    GovernanceProposal,
+    GovernanceSystem,
+    VoteRecord,
+    VoteStatus,
+)
 
 __all__ = [
     # 引擎
@@ -76,4 +82,9 @@ __all__ = [
     "FeeResult",
     "FeeDirection",
     "FeeType",
+    # 治理系统
+    "GovernanceProposal",
+    "GovernanceSystem",
+    "VoteRecord",
+    "VoteStatus",
 ]
