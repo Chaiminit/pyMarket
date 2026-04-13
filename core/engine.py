@@ -22,6 +22,8 @@ from .bond_pair import BondTradingPair
 from .trader import Trader
 from .token import Token
 from .liquidation import LiquidationEngine, LiquidationResult
+from .fees import FeeConfig
+from .corp import Corp
 
 
 class MarketEngine:
@@ -50,13 +52,18 @@ class MarketEngine:
 
     def __init__(self):
         """初始化市场引擎"""
-        self.tokens: Dict[str, Token] = {}
+        self.tokens: Dict[Token, str] = {}  # Token -> name 的映射
+        self._token_by_name: Dict[str, Token] = {}  # name -> Token 的映射（用于快速查找）
         self.trading_pairs: List[TradingPair] = []
         self.bond_trading_pairs: List[BondTradingPair] = []
         self.traders: List[Trader] = []
         self._quote_token: Optional[Token] = None
         self._step_counter = 0
         self._liquidation_engine = LiquidationEngine(self)
+
+        # 全局默认手续费配置（默认为零手续费）
+        self._default_trading_fee_config: FeeConfig = FeeConfig()
+        self._default_bond_fee_config: FeeConfig = FeeConfig()
 
     # ====== 代币管理 ======
 
@@ -76,7 +83,8 @@ class MarketEngine:
         """
         token_id = len(self.tokens)
         token = Token(name, token_id, is_quote)
-        self.tokens[name] = token
+        self.tokens[token] = name
+        self._token_by_name[name] = token
 
         if is_quote:
             if self._quote_token is not None:
@@ -95,7 +103,7 @@ class MarketEngine:
         Returns:
             Token实例或None
         """
-        return self.tokens.get(name)
+        return self._token_by_name.get(name)
 
     def set_quote_token(self, name: str) -> None:
         """
@@ -107,11 +115,11 @@ class MarketEngine:
         Raises:
             ValueError: 如果代币不存在或计价代币已设置
         """
-        if name not in self.tokens:
+        if name not in self._token_by_name:
             raise ValueError(f"代币 {name} 不存在")
         if self._quote_token is not None:
             raise ValueError(f"全局计价代币已存在: {self._quote_token}")
-        self._quote_token = self.tokens[name]
+        self._quote_token = self._token_by_name[name]
 
     def get_quote_token(self) -> Optional[Token]:
         """获取当前计价代币"""
@@ -119,7 +127,7 @@ class MarketEngine:
 
     # ====== 普通交易对 ======
 
-    def create_trading_pair(self, base_token_name: str, quote_token_name: str, initial_price: float) -> TradingPair:
+    def create_trading_pair(self, base_token_name: str, quote_token_name: str, initial_price: float, fee_config: Optional[FeeConfig] = None) -> TradingPair:
         """
         创建普通交易对
 
@@ -127,6 +135,7 @@ class MarketEngine:
             base_token_name: 基础代币名称
             quote_token_name: 计价代币名称
             initial_price: 初始价格
+            fee_config: 手续费配置，None 则使用全局默认配置
 
         Returns:
             创建的TradingPair实例
@@ -134,27 +143,30 @@ class MarketEngine:
         Raises:
             ValueError: 如果代币不存在
         """
-        base_token = self.tokens.get(base_token_name)
-        quote_token = self.tokens.get(quote_token_name)
+        base_token = self._token_by_name.get(base_token_name)
+        quote_token = self._token_by_name.get(quote_token_name)
 
         if base_token is None:
             raise ValueError(f"基础代币 {base_token_name} 不存在")
         if quote_token is None:
             raise ValueError(f"计价代币 {quote_token_name} 不存在")
 
-        pair = TradingPair(base_token, quote_token, initial_price)
+        # 使用传入的配置或全局默认配置
+        config = fee_config if fee_config is not None else self._default_trading_fee_config
+        pair = TradingPair(base_token, quote_token, initial_price, config)
         self.trading_pairs.append(pair)
         return pair
 
     # ====== 债券交易对 ======
 
-    def create_bond_trading_pair(self, token_name: str, initial_rate: float) -> BondTradingPair:
+    def create_bond_trading_pair(self, token_name: str, initial_rate: float, fee_config: Optional[FeeConfig] = None) -> BondTradingPair:
         """
         创建债券交易对
 
         Args:
             token_name: 标的代币名称
             initial_rate: 初始利率（年化）
+            fee_config: 手续费配置，None 则使用全局默认配置
 
         Returns:
             创建的BondTradingPair实例
@@ -162,11 +174,13 @@ class MarketEngine:
         Raises:
             ValueError: 如果代币不存在
         """
-        token = self.tokens.get(token_name)
+        token = self._token_by_name.get(token_name)
         if token is None:
             raise ValueError(f"代币 {token_name} 不存在")
 
-        bond_pair = BondTradingPair(token, initial_rate)
+        # 使用传入的配置或全局默认配置
+        config = fee_config if fee_config is not None else self._default_bond_fee_config
+        bond_pair = BondTradingPair(token, initial_rate, config)
         self.bond_trading_pairs.append(bond_pair)
         return bond_pair
 
@@ -201,18 +215,51 @@ class MarketEngine:
 
         return trader
 
-    def allocate_assets(self, trader: Trader, token_name: str, amount: float) -> None:
+    def create_corp(
+        self,
+        name: str,
+        total_shares: float,
+        initial_price: float,
+        quote_token: Token
+    ) -> Corp:
+        """
+        创建股份公司
+
+        Args:
+            name: 公司名称
+            total_shares: 初始发行的总股份数
+            initial_price: 初始发行价格
+            quote_token: 计价代币
+
+        Returns:
+            创建的Corp实例
+        """
+        token_id = len(self.tokens)
+        corp = Corp(
+            name=name,
+            total_shares=total_shares,
+            initial_price=initial_price,
+            quote_token=quote_token,
+            token_id=token_id
+        )
+        self.traders.append(corp)
+
+        # 设置价格转换器
+        if self._quote_token:
+            corp.set_price_converter(self._convert_price, self._quote_token)
+
+        return corp
+
+    def allocate_assets(self, trader: Trader, token: Token, amount: float) -> None:
         """
         分配资产给交易者
 
         Args:
             trader: 交易者
-            token_name: 代币名称
+            token: Token 对象
             amount: 数量
         """
-        token = self.tokens.get(token_name)
-        if token:
-            trader.add_asset(token, amount)
+        trader.add_asset(token, amount)
 
     def set_trader_pairs(self, trader: Trader, pairs: List[TradingPair]) -> None:
         """设置交易者的普通交易对列表"""
@@ -328,6 +375,69 @@ class MarketEngine:
             清算结果列表
         """
         return self._liquidation_engine.liquidation_history
+
+    # ====== 手续费配置 ======
+
+    def set_default_trading_fee_config(self, fee_config: FeeConfig) -> None:
+        """
+        设置默认现货交易手续费配置
+
+        Args:
+            fee_config: 手续费配置
+        """
+        self._default_trading_fee_config = fee_config
+
+    def set_default_bond_fee_config(self, fee_config: FeeConfig) -> None:
+        """
+        设置默认债券交易手续费配置
+
+        Args:
+            fee_config: 手续费配置
+        """
+        self._default_bond_fee_config = fee_config
+
+    def get_default_trading_fee_config(self) -> FeeConfig:
+        """
+        获取默认现货交易手续费配置
+
+        Returns:
+            默认手续费配置
+        """
+        return self._default_trading_fee_config
+
+    def get_default_bond_fee_config(self) -> FeeConfig:
+        """
+        获取默认债券交易手续费配置
+
+        Returns:
+            默认手续费配置
+        """
+        return self._default_bond_fee_config
+
+    def get_all_collected_fees(self) -> Dict[Token, float]:
+        """
+        获取所有交易对收集的手续费总额
+
+        Returns:
+            {Token: 手续费金额}
+        """
+        total_fees: Dict[Token, float] = {}
+
+        # 汇总现货交易手续费
+        for pair in self.trading_pairs:
+            fees = pair.get_collected_fees()
+            if isinstance(fees, dict):
+                for token, amount in fees.items():
+                    total_fees[token] = total_fees.get(token, 0.0) + amount
+
+        # 汇总债券交易手续费
+        for bond_pair in self.bond_trading_pairs:
+            fees = bond_pair.get_collected_fees()
+            if isinstance(fees, dict):
+                for token, amount in fees.items():
+                    total_fees[token] = total_fees.get(token, 0.0) + amount
+
+        return total_fees
 
 # 全局引擎实例（单例模式）
 _engine_instance: Optional[MarketEngine] = None

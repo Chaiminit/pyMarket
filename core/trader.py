@@ -203,6 +203,9 @@ class Trader:
         """
         提交普通限价单
 
+        对于买单，冻结的金额包含预估的手续费（按Taker费率计算最坏情况）。
+        实际成交时按Maker费率计算，多余部分会返还。
+
         Args:
             pair: 交易对
             direction: 'buy' 或 'sell'
@@ -212,14 +215,28 @@ class Trader:
         Returns:
             是否提交成功（资金/资产充足时成功）
         """
+        from .fees import FeeDirection
+
+        fee_config = pair.get_fee_config()
+
         if direction == "buy":
-            required = price * volume
+            trade_amount = price * volume
+
+            # 计算预估手续费（按最坏情况Taker费率）
+            estimated_fee = 0.0
+            if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
+                estimated_fee = trade_amount * fee_config.taker_rate
+
+            total_required = trade_amount + estimated_fee
             available = self.assets.get(pair.quote_token, 0.0)
-            if available < required:
+
+            if available < total_required:
                 return False
-            self.assets[pair.quote_token] = available - required
-            pair.submit_limit_order(self, direction, price, volume, required)
+
+            self.assets[pair.quote_token] = available - total_required
+            pair.submit_limit_order(self, direction, price, volume, total_required)
         else:  # sell
+            # 卖单冻结资产，手续费从成交所得中扣除
             available = self.assets.get(pair.base_token, 0.0)
             if available < volume:
                 return False
@@ -228,18 +245,64 @@ class Trader:
 
         return True
 
-    def submit_market_order(self, pair: "TradingPair", direction: str, volume: float) -> Tuple[float, List[Dict]]:
+    def submit_market_order(self, pair: "TradingPair", direction: str, volume: float) -> Tuple[float, List[Dict], float]:
         """
-        提交普通市价单
+        提交普通市价单（按标的代币数量）
 
         Args:
             pair: 交易对
             direction: 'buy' 或 'sell'
-            volume: 数量
+            volume: 标的代币数量
 
         Returns:
-            (实际成交量, 成交明细列表)
+            (实际成交量, 成交明细列表, 总手续费)
         """
+        return pair.execute_market_order(self, direction, volume)
+
+    def submit_market_order_by_quote(self, pair: "TradingPair", direction: str, quote_amount: float) -> Tuple[float, List[Dict], float]:
+        """
+        提交普通市价单（按计价代币金额）
+
+        买入时：指定花费多少计价代币（如 USDT）
+        卖出时：指定期望获得多少计价代币（系统会计算需要卖出的标的代币数量）
+
+        Args:
+            pair: 交易对
+            direction: 'buy' 或 'sell'
+            quote_amount: 计价代币金额
+
+        Returns:
+            (实际成交量, 成交明细列表, 总手续费)
+        """
+        if direction == "buy":
+            # 买入：计算能用 quote_amount 买到多少标的代币
+            # 需要考虑手续费，实际可用于购买的资金会减少
+            fee_config = pair.get_fee_config()
+            from .fees import FeeDirection
+
+            # 预估手续费（按最坏情况Taker费率）
+            estimated_fee_rate = 0.0
+            if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
+                estimated_fee_rate = fee_config.taker_rate
+
+            # 实际可用于购买的资金 = 总金额 / (1 + 手续费率)
+            available_for_trade = quote_amount / (1 + estimated_fee_rate) if estimated_fee_rate > 0 else quote_amount
+            volume = available_for_trade / pair.price
+        else:
+            # 卖出：计算需要卖出多少标的代币才能获得 quote_amount
+            # 需要考虑手续费，实际卖出的标的代币数量会增加
+            fee_config = pair.get_fee_config()
+            from .fees import FeeDirection
+
+            # 预估手续费率
+            estimated_fee_rate = 0.0
+            if fee_config.direction in (FeeDirection.SELLER, FeeDirection.BOTH):
+                estimated_fee_rate = fee_config.taker_rate
+
+            # 需要卖出的标的代币价值 = 期望获得金额 / (1 - 手续费率)
+            required_value = quote_amount / (1 - estimated_fee_rate) if estimated_fee_rate > 0 and estimated_fee_rate < 1 else quote_amount
+            volume = required_value / pair.price
+
         return pair.execute_market_order(self, direction, volume)
 
     def submit_bond_limit_order(self, bond_pair: "BondTradingPair", direction: str,
@@ -251,6 +314,8 @@ class Trader:
         - 买单（buy）：借出资金，支付代币，获得正债券（债权）
         - 卖单（sell）：借入资金，获得代币，获得负债券（债务）
 
+        对于债券买单，冻结的金额包含预估的手续费。
+
         Args:
             bond_pair: 债券交易对
             direction: 'buy' 或 'sell'
@@ -260,16 +325,29 @@ class Trader:
         Returns:
             是否提交成功
         """
+        from .fees import FeeDirection
+
+        fee_config = bond_pair.get_fee_config()
+
         if direction == "buy":
             # 买单：需要预先拥有代币来借出资金
+
+            # 计算预估手续费（按最坏情况Taker费率）
+            estimated_fee = 0.0
+            if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
+                estimated_fee = volume * fee_config.taker_rate
+
+            total_required = volume + estimated_fee
             available = self.assets.get(bond_pair.token, 0.0)
-            if available < volume:
+
+            if available < total_required:
                 return False
-            self.assets[bond_pair.token] = available - volume
-            bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
+
+            self.assets[bond_pair.token] = available - total_required
+            bond_pair.submit_limit_order(self, direction, interest_rate, volume, total_required)
         else:  # sell
             # 卖单：借入资金，冻结债务额度（负债券）
-            # 成交后会获得代币和负债券（债务）
+            # 成交后会获得代币和负债券（债务），手续费从所得中扣除
             self.bonds[bond_pair.token] = self.bonds.get(bond_pair.token, 0.0) - volume
             bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
 

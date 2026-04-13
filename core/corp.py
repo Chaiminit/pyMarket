@@ -6,15 +6,17 @@ Corp 模块 - 股份公司类
 - 自动生成股份代币
 - 自动创建股份/计价代币交易对
 - 提交不可撤回的一级市场卖单（IPO）
+- 分红功能：按持股比例分配利润
 
 股份公司机制：
 - 初始发行一定数量的股份
 - 设定初始发行价格
 - 所有股份以限价单形式挂出，不可撤回
 - 模拟一级市场（IPO）发行
+- 分红：将利润分配给所有持股人
 """
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List
 from .trader import Trader
 from .token import Token
 from .trading_pair import TradingPair
@@ -167,3 +169,193 @@ class Corp(Trader):
             sold_shares = self.ipo_order.executed
             return sold_shares * self.initial_price
         return 0.0
+
+    def get_share_holders(self, all_traders: List[Trader]) -> Dict[Trader, float]:
+        """
+        获取所有股份持有人及其持股数量（不包括公司自己）
+
+        Args:
+            all_traders: 市场中所有交易者的列表
+
+        Returns:
+            {Trader: 持股数量} 的字典
+        """
+        holders: Dict[Trader, float] = {}
+        for trader in all_traders:
+            # 排除公司自己
+            if trader is not self:
+                shares = trader.assets.get(self.share_token, 0.0)
+                if shares > 0:
+                    holders[trader] = shares
+        return holders
+
+    def get_circulating_shares(self, all_traders: List[Trader]) -> float:
+        """
+        获取流通中的股份总数（已售出的股份，不包括公司自己持有的）
+
+        Args:
+            all_traders: 市场中所有交易者的列表
+
+        Returns:
+            流通股份总数
+        """
+        total = 0.0
+        for trader in all_traders:
+            # 排除公司自己
+            if trader is not self:
+                total += trader.assets.get(self.share_token, 0.0)
+        return total
+
+    def distribute_dividend(
+        self,
+        dividend_token: Token,
+        total_amount: float,
+        all_traders: List[Trader]
+    ) -> Dict[Trader, float]:
+        """
+        分红 - 按持股比例分配代币给所有股东
+
+        公司从自己的资产中拿出一定数量的代币，
+        按照各股东的持股比例进行分配。
+
+        Args:
+            dividend_token: 用于分红的代币（如 USDT）
+            total_amount: 分红总额
+            all_traders: 市场中所有交易者的列表
+
+        Returns:
+            {Trader: 分红金额} 的分红记录
+
+        Raises:
+            ValueError: 如果公司资产不足以支付分红
+
+        Examples:
+            >>> # 公司拿出 10000 USDT 分红
+            >>> dividend_record = company.distribute_dividend(
+            ...     dividend_token=usdt,
+            ...     total_amount=10000.0,
+            ...     all_traders=engine.traders
+            ... )
+            >>> for trader, amount in dividend_record.items():
+            ...     print(f"{trader.name} 获得分红: {amount} USDT")
+        """
+        # 检查公司是否有足够的资产进行分红
+        company_balance = self.assets.get(dividend_token, 0.0)
+        if company_balance < total_amount:
+            raise ValueError(
+                f"公司 {self.name} 资产不足: "
+                f"需要 {total_amount} {dividend_token.name}, "
+                f"但仅有 {company_balance} {dividend_token.name}"
+            )
+
+        # 获取流通中的股份总数
+        circulating_shares = self.get_circulating_shares(all_traders)
+        if circulating_shares <= 0:
+            # 没有流通股份，不进行分红
+            return {}
+
+        # 从公司资产中扣除分红总额
+        self.assets[dividend_token] = company_balance - total_amount
+
+        # 获取所有股东
+        holders = self.get_share_holders(all_traders)
+
+        # 按持股比例分配分红
+        dividend_record: Dict[Trader, float] = {}
+        for holder, shares in holders.items():
+            # 计算持股比例
+            ratio = shares / circulating_shares
+            # 计算分红金额
+            dividend = total_amount * ratio
+            # 发放分红
+            holder.assets[dividend_token] = holder.assets.get(dividend_token, 0.0) + dividend
+            # 记录
+            dividend_record[holder] = dividend
+
+        return dividend_record
+
+    def get_dividend_per_share(
+        self,
+        total_amount: float,
+        all_traders: List[Trader]
+    ) -> float:
+        """
+        计算每股分红金额
+
+        Args:
+            total_amount: 分红总额
+            all_traders: 市场中所有交易者的列表
+
+        Returns:
+            每股分红金额（如果无流通股份则返回 0）
+        """
+        circulating_shares = self.get_circulating_shares(all_traders)
+        if circulating_shares <= 0:
+            return 0.0
+        return total_amount / circulating_shares
+
+    def issue_shares(self, amount: float, issue_price: Optional[float] = None) -> float:
+        """
+        增发股份 - 公司向自己发行新的股份
+
+        增发会增加公司的总股本，新发行的股份直接添加给公司自己。
+        公司可以选择将这些股份逐步出售到市场（通过交易对），
+        或用于股权激励、并购等用途。
+
+        Args:
+            amount: 增发的股份数量（必须为正数）
+            issue_price: 增发价格（可选，用于更新交易对价格参考）
+
+        Returns:
+            增发后的公司总股本
+
+        Raises:
+            ValueError: 如果增发数量不是正数
+
+        Examples:
+            >>> # 增发 100 万股
+            >>> new_total = company.issue_shares(1000000.0)
+            >>> print(f"增发后总股本: {new_total}")
+            >>>
+            >>> # 增发并更新发行价格
+            >>> company.issue_shares(500000.0, issue_price=15.0)
+        """
+        if amount <= 0:
+            raise ValueError(f"增发数量必须为正数，收到: {amount}")
+
+        # 更新总股本
+        self.total_shares += amount
+
+        # 将新股份添加给公司自己
+        current_shares = self.assets.get(self.share_token, 0.0)
+        self.assets[self.share_token] = current_shares + amount
+
+        # 如果提供了增发价格，更新交易对的当前价格参考
+        if issue_price is not None and issue_price > 0:
+            self.trading_pair.price = issue_price
+            # 同时更新初始价格（作为最新参考）
+            self.initial_price = issue_price
+
+        return self.total_shares
+
+    def get_company_owned_shares(self) -> float:
+        """
+        获取公司自己持有的股份数量（库藏股）
+
+        Returns:
+            公司持有的股份数量
+        """
+        return self.assets.get(self.share_token, 0.0)
+
+    def get_market_cap(self, current_price: Optional[float] = None) -> float:
+        """
+        计算市值
+
+        Args:
+            current_price: 当前股价，None 则使用交易对的当前价格
+
+        Returns:
+            总市值（总股本 × 股价）
+        """
+        price = current_price if current_price is not None else self.trading_pair.price
+        return self.total_shares * price

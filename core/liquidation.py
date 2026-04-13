@@ -32,7 +32,7 @@ class LiquidationResult:
     total_assets: float  # 总资产价值
     total_liabilities: float  # 总负债价值
     shortfall: float  # 资金缺口（坏账）
-    creditors_paid: Dict[str, float]  # 各债权人获得的偿付
+    creditors_paid: Dict["Trader", float]  # 各债权人获得的偿付
     bad_debt_written_off: float  # 核销的坏账
 
 
@@ -363,7 +363,7 @@ class LiquidationEngine:
     def _distribute_remaining_assets(
         self,
         trader: "Trader",
-        creditors_paid: Dict[str, float]
+        creditors_paid: Dict["Trader", float]
     ) -> float:
         """
         分配剩余资产给债权人

@@ -5,6 +5,7 @@ BondPair 模块 - 债券交易对
 - 债券限价单订单簿管理
 - 债券订单撮合（转移债券所有权）
 - 利息结算系统（从债务人收取，支付给债权人）
+- 债券交易手续费
 
 债券系统机制：
 - 正债券 = 债权（借出资金，收取利息）
@@ -14,11 +15,12 @@ BondPair 模块 - 债券交易对
 
 import time
 import math
-from typing import Dict, Set, List, Tuple, TYPE_CHECKING
+from typing import Dict, Set, List, Tuple, Optional, TYPE_CHECKING
 
 from .trader import Trader
 from .order import BondOrder
 from .token import Token
+from .fees import FeeConfig, FeeCalculator, FeeCollector
 
 if TYPE_CHECKING:
     pass
@@ -38,31 +40,73 @@ class BondTradingPair:
     Attributes:
         token: 债券标的代币
         current_rate: 当前市场利率
-        log: 成交记录
+        log: 成交记录 [(timestamp, rate, volume, buyer_fee, seller_fee), ...]
         buy_orders: 债券买单列表（按利率降序）
         sell_orders: 债券卖单列表（按利率升序）
         clients: 参与此债券市场的交易者集合
+        fee_config: 手续费配置
+        fee_calculator: 手续费计算器
+        fee_collector: 手续费收集器
 
     Examples:
         >>> bond_pair = BondTradingPair(usdt, 0.05)  # 5%年利率
+        >>> bond_pair.set_fee_config(FeePresets.standard())  # 设置手续费
         >>> bond_pair.submit_limit_order(trader, "buy", 0.04, 1000, 1000)
         >>> insolvent = bond_pair.settle_interest_simple(traders, dt=0.1)
     """
 
-    def __init__(self, token: Token, initial_rate: float):
+    def __init__(self, token: Token, initial_rate: float, fee_config: Optional[FeeConfig] = None):
         """
         创建债券交易对
 
         Args:
             token: 债券标的代币
             initial_rate: 初始市场利率（年化）
+            fee_config: 手续费配置，默认零手续费
         """
         self.token = token
         self.current_rate = initial_rate
-        self.log: List[Tuple[float, float, float]] = []
+        self.log: List[Tuple[float, float, float, float, float]] = []
         self.buy_orders: List[BondOrder] = []
         self.sell_orders: List[BondOrder] = []
         self.clients: Set[Trader] = set()
+
+        # 手续费系统（默认为零手续费）
+        self.fee_config = fee_config or FeeConfig()
+        self.fee_calculator = FeeCalculator(self.fee_config)
+        self.fee_collector = FeeCollector(self.fee_config.fee_recipient)
+
+    def set_fee_config(self, fee_config: FeeConfig) -> None:
+        """
+        设置手续费配置
+
+        Args:
+            fee_config: 新的手续费配置
+        """
+        self.fee_config = fee_config
+        self.fee_calculator = FeeCalculator(fee_config)
+        self.fee_collector = FeeCollector(fee_config.fee_recipient)
+
+    def get_fee_config(self) -> FeeConfig:
+        """
+        获取当前手续费配置
+
+        Returns:
+            当前手续费配置
+        """
+        return self.fee_config
+
+    def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]:
+        """
+        获取已收集的手续费
+
+        Args:
+            token: Token 对象，None 则返回所有
+
+        Returns:
+            指定代币的手续费金额，或所有代币的手续费字典
+        """
+        return self.fee_collector.get_collected(token)
 
     def get_total_bonds(self, traders: Set[Trader]) -> float:
         """
@@ -213,6 +257,7 @@ class BondTradingPair:
         3. 成交量为 min(买剩余, 卖剩余)
         4. 成交利率为卖单利率（被动方利率）
         5. 债券方向：买单获得正债券（债权），卖单获得负债券（债务）
+        6. 双方都是 Maker，按 Maker 费率收取手续费
 
         债券方向说明：
         - 买单（buy）：借出资金，支付代币，获得正债券（债权）
@@ -232,26 +277,50 @@ class BondTradingPair:
             buyer = best_buy.trader
             seller = best_sell.trader
 
-            # 检查买家资金（买单需要支付代币）
-            buyer_funds = buyer.assets.get(self.token, 0.0)
-            required_funds = match_volume
-            if buyer_funds < required_funds:
+            # 计算手续费（债券撮合，双方都是 Maker）
+            buyer_fee = self.fee_calculator.calculate(match_volume, is_taker=False, is_buyer=True)
+            seller_fee = self.fee_calculator.calculate(match_volume, is_taker=False, is_buyer=False)
+
+            total_buyer_cost = match_volume + buyer_fee
+
+            # 检查买家资金（使用剩余冻结资金）
+            # 买家下单时已经冻结了资金，使用 remaining_frozen 检查是否足够
+            if best_buy.remaining_frozen < total_buyer_cost:
                 # 资金不足，取消买单
                 best_buy.close()
                 continue
 
             # 执行债券交易
-            # 买家（买单）：借出资金，支付代币，获得正债券（债权）
-            # 注意：买单提交时已冻结资金，这里直接获得正债券
-            buyer.assets[self.token] = buyer_funds - match_volume
+            # 买家（买单）：借出资金，获得正债券（债权）
+            # 注意：资金已从冻结中扣除，这里只需获得正债券
             buyer.bonds[self.token] = buyer.bonds.get(self.token, 0.0) + match_volume
 
             # 卖家（卖单）：借入资金，获得代币，获得负债券（债务）
-            # 注意：卖单提交时已冻结负债券，这里只需释放冻结并获得代币
-            # 债券在提交时已预扣，这里不需要再修改
+            # 注意：卖单提交时已冻结负债券，这里只需释放冻结并获得代币（扣除手续费）
             seller.assets[self.token] = (
-                seller.assets.get(self.token, 0.0) + match_volume
+                seller.assets.get(self.token, 0.0) + match_volume - seller_fee
             )
+
+            # 收取手续费
+            self.fee_collector.collect(self.token, buyer_fee, {
+                "trader": buyer.name,
+                "direction": "buy",
+                "is_taker": False,
+                "volume": match_volume,
+                "rate": match_rate
+            })
+            self.fee_collector.collect(self.token, seller_fee, {
+                "trader": seller.name,
+                "direction": "sell",
+                "is_taker": False,
+                "volume": match_volume,
+                "rate": match_rate
+            })
+
+            # 计算多冻结的手续费（冻结时按Taker，实际按Maker）
+            taker_fee_estimate = match_volume * self.fee_config.taker_rate
+            maker_fee_actual = buyer_fee
+            excess_frozen = taker_fee_estimate - maker_fee_actual
 
             # 更新订单状态
             best_buy.remaining_frozen -= match_volume
@@ -259,8 +328,12 @@ class BondTradingPair:
             best_buy.executed += match_volume
             best_sell.executed += match_volume
 
-            # 记录成交
-            self.log.append((time.time(), match_rate, match_volume))
+            # 返还多冻结的手续费到买家资产
+            if excess_frozen > 0.000001:
+                buyer.assets[self.token] = buyer.assets.get(self.token, 0.0) + excess_frozen
+
+            # 记录成交（包含手续费）
+            self.log.append((time.time(), match_rate, match_volume, buyer_fee, seller_fee))
             self.current_rate = match_rate
 
             # 完成订单处理
