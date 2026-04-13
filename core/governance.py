@@ -140,38 +140,41 @@ class GovernanceProposal:
     def cast_vote(self, voter: "Trader", option: str) -> bool:
         """
         投票
-        
+
+        投票后会调用 voter 的 on_vote_cast 方法，
+        如果达到最低参与率，还会调用 creator 的 on_proposal_reached_quorum 方法。
+
         Args:
             voter: 投票者
             option: 选择的选项
-            
+
         Returns:
             是否投票成功
-            
+
         Raises:
             ValueError: 如果投票者不是参与人、选项无效或投票已结束
         """
         # 检查投票状态
         if self.status != VoteStatus.ACTIVE:
             raise ValueError(f"投票状态为 {self.status.value}，无法投票")
-        
+
         # 检查是否已过截止时间
         if self.end_time and datetime.now() > self.end_time:
             raise ValueError("投票已截止")
-        
+
         # 检查投票者是否为参与人
         if voter not in self.participants:
             raise ValueError(f"{voter.name} 不是本次投票的参与人")
-        
+
         # 检查选项是否有效
         if option not in self.options:
             raise ValueError(f"无效选项: {option}，有效选项为 {self.options}")
-        
+
         # 检查是否已经投过票
         for vote in self.votes:
             if vote.voter is voter:
                 raise ValueError(f"{voter.name} 已经投过票")
-        
+
         # 记录投票
         weight = self.participants[voter]
         vote_record = VoteRecord(
@@ -180,7 +183,26 @@ class GovernanceProposal:
             weight=weight
         )
         self.votes.append(vote_record)
-        
+
+        # 调用投票者的回调方法
+        try:
+            voter.on_vote_cast(self, option, weight)
+        except Exception as e:
+            # 回调失败不应影响投票流程，但应该记录
+            print(f"警告: 投票者 {voter.name} 的 on_vote_cast 回调失败: {e}")
+
+        # 检查是否达到最低参与率
+        result = self.tally_votes()
+        if result['is_valid']:
+            # 调用提案创建者的回调方法
+            try:
+                self.creator.on_proposal_reached_quorum(self, result)
+            except Exception as e:
+                # 回调失败不应影响投票流程，但应该记录
+                print(f"警告: 提案创建者 {self.creator.name} 的 on_proposal_reached_quorum 回调失败: {e}")
+            # 达到最低参与率后自动关闭提案
+            self.close_voting()
+
         return True
     
     def change_vote(self, voter: "Trader", new_option: str) -> bool:

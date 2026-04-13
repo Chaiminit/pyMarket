@@ -244,6 +244,11 @@ class MarketEngine:
         )
         self.traders.append(corp)
 
+        # 注册股份代币到引擎
+        share_token_name = f"{name}_SHARE"
+        self.tokens[corp.share_token] = share_token_name
+        self._token_by_name[share_token_name] = corp.share_token
+
         # 设置价格转换器
         if self._quote_token:
             corp.set_price_converter(self._convert_price, self._quote_token)

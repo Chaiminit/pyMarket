@@ -3,7 +3,7 @@ BondPair 模块 - 债券交易对
 
 提供债券市场的核心功能：
 - 债券限价单订单簿管理
-- 债券订单撮合（转移债券所有权）
+- 债券订单撮合（转移债券所有权，线程安全）
 - 利息结算系统（从债务人收取，支付给债权人）
 - 债券交易手续费
 
@@ -11,11 +11,17 @@ BondPair 模块 - 债券交易对
 - 正债券 = 债权（借出资金，收取利息）
 - 负债券 = 债务（借入资金，支付利息）
 - 债券交易转移的是债权/债务关系
+
+线程安全说明：
+- 所有订单簿操作都受 _lock 保护
+- 撮合过程是原子操作
+- 支持多线程并发访问
 """
 
 import time
 import math
 from typing import Dict, Set, List, Tuple, Optional, TYPE_CHECKING
+from threading import Lock
 
 from .trader import Trader
 from .order import BondOrder
@@ -70,6 +76,9 @@ class BondTradingPair:
         self.buy_orders: List[BondOrder] = []
         self.sell_orders: List[BondOrder] = []
         self.clients: Set[Trader] = set()
+
+        # 线程锁，用于保护订单簿和撮合操作
+        self._lock = Lock()
 
         # 手续费系统（默认为零手续费）
         self.fee_config = fee_config or FeeConfig()
@@ -217,7 +226,7 @@ class BondTradingPair:
         frozen_amount: float,
     ) -> None:
         """
-        提交债券限价单
+        提交债券限价单（线程安全）
 
         订单按利率优先、时间优先排序：
         - 买单：利率降序（高利率优先）
@@ -230,22 +239,23 @@ class BondTradingPair:
             volume: 债券数量
             frozen_amount: 冻结资金（买单）或债券（卖单）
         """
-        order = BondOrder(
-            trader, direction, interest_rate, volume, frozen_amount, self
-        )
+        with self._lock:
+            order = BondOrder(
+                trader, direction, interest_rate, volume, frozen_amount, self
+            )
 
-        if direction == "buy":
-            self.buy_orders.append(order)
-            # 利率升序，同利率按时间升序
-            self.buy_orders.sort(key=lambda x: (x.interest_rate, x.time))
-        else:
-            self.sell_orders.append(order)
-            # 利率降序，同利率按时间升序
-            self.sell_orders.sort(key=lambda x: (-x.interest_rate, x.time))
+            if direction == "buy":
+                self.buy_orders.append(order)
+                # 利率升序，同利率按时间升序
+                self.buy_orders.sort(key=lambda x: (x.interest_rate, x.time))
+            else:
+                self.sell_orders.append(order)
+                # 利率降序，同利率按时间升序
+                self.sell_orders.sort(key=lambda x: (-x.interest_rate, x.time))
 
-        trader.bond_orders.append(order)
-        self.clients.add(trader)
-        self._match_bond_orders()
+            trader.bond_orders.append(order)
+            self.clients.add(trader)
+            self._match_bond_orders()
 
     def _match_bond_orders(self) -> None:
         """

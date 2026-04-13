@@ -12,6 +12,7 @@
 - **股份公司系统**：支持IPO发行、股份代币创建、一级市场交易、增发股份和分红
 - **治理投票系统**：支持加权投票、多选项治理提案、参与率检查
 - **手续费系统**：支持Maker/Taker费率、自定义手续费接收者
+- **并发安全**：撮合引擎采用线程锁保护，支持多线程并发交易
 - **实时GUI界面**：使用PyQt5构建的实时K线图和交易界面
 - **玩家模式**：支持人类玩家参与市场交易
 - **风险管理**：自动清算和破产处理机制
@@ -289,15 +290,23 @@ class Trader:
     def get_net_assets(self, quote_token: Optional[Token] = None) -> float
     
     # 订单提交
-    def submit_limit_order(self, pair: TradingPair, direction: str, 
+    def submit_limit_order(self, pair: TradingPair, direction: str,
                           price: float, volume: float) -> bool
-    def submit_market_order(self, pair: TradingPair, direction: str, 
+    def submit_market_order(self, pair: TradingPair, direction: str,
                            volume: float) -> Tuple[float, List[Dict], float]
     def submit_market_order_by_quote(self, pair: TradingPair, direction: str,
                                       quote_amount: float) -> Tuple[float, List[Dict], float]
     def submit_bond_limit_order(self, bond_pair: BondTradingPair, direction: str,
                                  interest_rate: float, volume: float) -> bool
+    
+    # 治理回调
+    def on_vote_cast(self, proposal: GovernanceProposal, option: str, weight: float) -> None
+    def on_proposal_reached_quorum(self, proposal: GovernanceProposal, result: Dict[str, Any]) -> None
 ```
+
+**治理回调说明：**
+- `on_vote_cast()`：当该交易者参与投票时被调用，可重写以实现自定义逻辑
+- `on_proposal_reached_quorum()`：当该交易者创建的提案达到最低参与率时被调用，调用后提案自动关闭
 
 ### Corp
 
@@ -412,32 +421,42 @@ class Token:
 
 ### TradingPair
 
-普通交易对类。
+普通交易对类，支持线程安全的订单撮合。
 
 ```python
 class TradingPair:
-    def submit_limit_order(self, trader: Trader, direction: str, 
+    def submit_limit_order(self, trader: Trader, direction: str,
                           price: float, volume: float, frozen_amount: float)
-    def execute_market_order(self, trader: Trader, direction: str, 
+    def execute_market_order(self, trader: Trader, direction: str,
                             volume: float) -> Tuple[float, List[Dict], float]
     def set_fee_config(self, fee_config: FeeConfig) -> None
     def get_fee_config(self) -> FeeConfig
     def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]
 ```
 
+**并发安全说明：**
+- `submit_limit_order()` 和 `execute_market_order()` 方法使用线程锁保护
+- 支持多线程并发提交订单，无需外部同步
+- 订单簿操作具有原子性保证
+
 ### BondTradingPair
 
-债券交易对类。
+债券交易对类，支持线程安全的债券交易。
 
 ```python
 class BondTradingPair:
-    def submit_limit_order(self, trader: Trader, direction: str, 
+    def submit_limit_order(self, trader: Trader, direction: str,
                           interest_rate: float, volume: float, frozen_amount: float)
     def settle_interest_simple(self, traders: Set[Trader], dt: float) -> List[Tuple[Trader, float]]
     def set_fee_config(self, fee_config: FeeConfig) -> None
     def get_fee_config(self) -> FeeConfig
     def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]
 ```
+
+**并发安全说明：**
+- `submit_limit_order()` 方法使用线程锁保护
+- 支持多线程并发提交债券订单
+- 债券订单簿操作具有原子性保证
 
 ### LiquidationEngine
 
@@ -468,6 +487,12 @@ class LiquidationEngine:
 - **参与率检查**：可设置最低参与率要求，未达到则投票无效
 - **投票修改**：在投票结束前可以修改投票选择
 - **自动过期**：支持设置投票截止时间，到期自动关闭
+- **回调机制**：投票时自动调用投票者的 `on_vote_cast()`，达到最低参与率时调用创建者的 `on_proposal_reached_quorum()` 并自动关闭提案
+
+**并发安全说明：**
+- 撮合引擎（`TradingPair` 和 `BondTradingPair`）已内置线程锁保护
+- 所有订单提交操作（`submit_limit_order`、`execute_market_order`）都是线程安全的
+- 支持在多线程环境中并发交易，无需额外的外部同步机制
 
 ## 项目结构
 

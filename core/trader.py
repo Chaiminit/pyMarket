@@ -9,7 +9,7 @@ Trader 模块 - 交易者定义
 支持总资产和净资产的计算（按计价代币换算）。
 """
 
-from typing import Dict, List, Optional, Callable, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Callable, Tuple, Any, TYPE_CHECKING
 
 from .token import Token
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from .trading_pair import TradingPair
     from .bond_pair import BondTradingPair
     from .order import Order, BondOrder
+    from .governance import GovernanceProposal
 
 
 class Trader:
@@ -370,3 +371,50 @@ class Trader:
             order.close()
             return True
         return False
+
+    # ====== 治理投票回调方法 ======
+
+    def on_vote_cast(
+        self,
+        proposal: "GovernanceProposal",
+        option: str,
+        weight: float
+    ) -> None:
+        """
+        当该交易者参与投票时被调用
+
+        子类可以重写此方法来实现自定义的投票逻辑或通知。
+
+        Args:
+            proposal: 治理提案
+            option: 选择的选项
+            weight: 投票权重
+
+        Examples:
+            >>> class MyTrader(Trader):
+            ...     def on_vote_cast(self, proposal, option, weight):
+            ...         print(f"投票给 {proposal.title}: {option}")
+        """
+        pass
+
+    def on_proposal_reached_quorum(
+        self,
+        proposal: "GovernanceProposal",
+        result: Dict[str, Any]
+    ) -> None:
+        """
+        当该交易者创建的提案达到最低参与率时被调用
+
+        子类可以重写此方法来实现自定义的提案执行逻辑。
+
+        Args:
+            proposal: 治理提案
+            result: 投票结果统计
+
+        Examples:
+            >>> class MyTrader(Trader):
+            ...     def on_proposal_reached_quorum(self, proposal, result):
+            ...         if result['is_valid']:
+            ...             print(f"提案通过: {result['winner']}")
+        """
+        pass

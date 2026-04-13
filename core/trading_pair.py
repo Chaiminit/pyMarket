@@ -3,16 +3,22 @@ TradingPair 模块 - 普通交易对
 
 管理基础代币/计价代币的交易对，提供：
 - 限价单订单簿管理（买单簿、卖单簿）
-- 订单撮合引擎
+- 订单撮合引擎（线程安全）
 - 市价单执行
 - 市场深度查询
 - 手续费计算和收取
+
+线程安全说明：
+- 所有订单簿操作都受 _lock 保护
+- 撮合过程是原子操作
+- 支持多线程并发访问
 """
 
 import time
 import math
 import random
 from typing import List, Dict, Tuple, Optional, Set
+from threading import Lock
 
 from .trader import Trader
 from .order import Order
@@ -70,6 +76,9 @@ class TradingPair:
         self.sell_orders: List[Order] = []
         self.clients: Set[Trader] = set()
 
+        # 线程锁，用于保护订单簿和撮合操作
+        self._lock = Lock()
+
         # 手续费系统（默认为零手续费）
         self.fee_config = fee_config or FeeConfig()
         self.fee_calculator = FeeCalculator(self.fee_config)
@@ -111,7 +120,7 @@ class TradingPair:
         self, trader: Trader, direction: str, price: float, volume: float, frozen_amount: float
     ) -> None:
         """
-        提交限价单到订单簿
+        提交限价单到订单簿（线程安全）
 
         订单按价格优先、时间优先排序：
         - 买单：价格降序（高价优先）
@@ -126,26 +135,27 @@ class TradingPair:
             volume: 数量
             frozen_amount: 冻结资金（买单）或资产（卖单）
         """
-        order = Order(trader, direction, price, volume, frozen_amount, self)
+        with self._lock:
+            order = Order(trader, direction, price, volume, frozen_amount, self)
 
-        if direction == "buy":
-            self.buy_orders.append(order)
-            # 价格降序，同价格按时间升序
-            self.buy_orders.sort(key=lambda x: (-x.price, x.time))
-        else:
-            self.sell_orders.append(order)
-            # 价格升序，同价格按时间升序
-            self.sell_orders.sort(key=lambda x: (x.price, x.time))
+            if direction == "buy":
+                self.buy_orders.append(order)
+                # 价格降序，同价格按时间升序
+                self.buy_orders.sort(key=lambda x: (-x.price, x.time))
+            else:
+                self.sell_orders.append(order)
+                # 价格升序，同价格按时间升序
+                self.sell_orders.sort(key=lambda x: (x.price, x.time))
 
-        trader.orders.append(order)
-        self.clients.add(trader)
-        self._match_orders()
+            trader.orders.append(order)
+            self.clients.add(trader)
+            self._match_orders()
 
     def execute_market_order(
         self, trader: Trader, direction: str, volume: float
     ) -> Tuple[float, List[Dict], float]:
         """
-        执行市价单 - 立即以最优价格成交
+        执行市价单 - 立即以最优价格成交（线程安全）
 
         市价单会遍历对手方订单簿，尽可能成交指定数量。
         如果市场深度不足，只成交可成交的部分。
@@ -162,175 +172,176 @@ class TradingPair:
         if volume <= 0:
             return 0.0, [], 0.0
 
-        executed_volume = 0.0
-        total_cost_or_revenue = 0.0
-        total_fee = 0.0
-        trade_details: List[Dict] = []
+        with self._lock:
+            executed_volume = 0.0
+            total_cost_or_revenue = 0.0
+            total_fee = 0.0
+            trade_details: List[Dict] = []
 
-        if direction == "buy":
-            # 买入：与卖单簿撮合（市价买单是Taker，限价卖单是Maker）
-            while volume > 0 and self.sell_orders:
-                sell_order = self.sell_orders[0]
-                match_volume = min(volume, sell_order.remaining_volume)
-                match_price = sell_order.price
-                match_cost = match_volume * match_price
+            if direction == "buy":
+                # 买入：与卖单簿撮合（市价买单是Taker，限价卖单是Maker）
+                while volume > 0 and self.sell_orders:
+                    sell_order = self.sell_orders[0]
+                    match_volume = min(volume, sell_order.remaining_volume)
+                    match_price = sell_order.price
+                    match_cost = match_volume * match_price
 
-                # 检查买家余额（需要支付金额 + 手续费）
-                buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True)
-                total_required = match_cost + buyer_fee
+                    # 检查买家余额（需要支付金额 + 手续费）
+                    buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True)
+                    total_required = match_cost + buyer_fee
 
-                available = trader.assets.get(self.quote_token, 0.0)
-                if available < total_required:
-                    if available > 0:
-                        # 重新计算可购买的量（考虑手续费）
-                        fee_rate = buyer_fee / match_cost if match_cost > 0 else 0
-                        max_cost = available / (1 + fee_rate) if fee_rate > 0 else available
-                        max_buy_volume = max_cost / match_price
-                        if max_buy_volume > 0.000001:
-                            match_volume = min(match_volume, max_buy_volume)
-                            match_cost = match_volume * match_price
-                            buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True)
-                            total_required = match_cost + buyer_fee
+                    available = trader.assets.get(self.quote_token, 0.0)
+                    if available < total_required:
+                        if available > 0:
+                            # 重新计算可购买的量（考虑手续费）
+                            fee_rate = buyer_fee / match_cost if match_cost > 0 else 0
+                            max_cost = available / (1 + fee_rate) if fee_rate > 0 else available
+                            max_buy_volume = max_cost / match_price
+                            if max_buy_volume > 0.000001:
+                                match_volume = min(match_volume, max_buy_volume)
+                                match_cost = match_volume * match_price
+                                buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True)
+                                total_required = match_cost + buyer_fee
+                            else:
+                                break
                         else:
                             break
-                    else:
-                        break
 
-                # 计算卖方手续费
-                seller_fee = self.fee_calculator.calculate(match_cost, is_taker=False, is_buyer=False)
-                seller_revenue = match_cost - seller_fee
+                    # 计算卖方手续费
+                    seller_fee = self.fee_calculator.calculate(match_cost, is_taker=False, is_buyer=False)
+                    seller_revenue = match_cost - seller_fee
 
-                # 执行交易
-                trader.assets[self.quote_token] = available - total_required
-                trader.assets[self.base_token] = (
-                    trader.assets.get(self.base_token, 0.0) + match_volume
-                )
+                    # 执行交易
+                    trader.assets[self.quote_token] = available - total_required
+                    trader.assets[self.base_token] = (
+                        trader.assets.get(self.base_token, 0.0) + match_volume
+                    )
 
-                seller = sell_order.trader
-                sell_order.remaining_frozen -= match_volume
-                seller.assets[self.quote_token] = (
-                    seller.assets.get(self.quote_token, 0.0) + seller_revenue
-                )
+                    seller = sell_order.trader
+                    sell_order.remaining_frozen -= match_volume
+                    seller.assets[self.quote_token] = (
+                        seller.assets.get(self.quote_token, 0.0) + seller_revenue
+                    )
 
-                # 收取手续费
-                self.fee_collector.collect(self.quote_token, buyer_fee, {
-                    "trader": trader.name,
-                    "direction": "buy",
-                    "is_taker": True,
-                    "volume": match_volume,
-                    "price": match_price
-                })
-                self.fee_collector.collect(self.quote_token, seller_fee, {
-                    "trader": seller.name,
-                    "direction": "sell",
-                    "is_taker": False,
-                    "volume": match_volume,
-                    "price": match_price
-                })
+                    # 收取手续费
+                    self.fee_collector.collect(self.quote_token, buyer_fee, {
+                        "trader": trader.name,
+                        "direction": "buy",
+                        "is_taker": True,
+                        "volume": match_volume,
+                        "price": match_price
+                    })
+                    self.fee_collector.collect(self.quote_token, seller_fee, {
+                        "trader": seller.name,
+                        "direction": "sell",
+                        "is_taker": False,
+                        "volume": match_volume,
+                        "price": match_price
+                    })
 
-                # 记录成交
-                self.log.append((time.time(), match_price, match_volume, buyer_fee, seller_fee))
-                self.price = match_price
+                    # 记录成交
+                    self.log.append((time.time(), match_price, match_volume, buyer_fee, seller_fee))
+                    self.price = match_price
 
-                trade_details.append({
-                    "price": match_price,
-                    "volume": match_volume,
-                    "cost": match_cost,
-                    "buyer_fee": buyer_fee,
-                    "seller_fee": seller_fee,
-                    "counterparty": seller,
-                })
+                    trade_details.append({
+                        "price": match_price,
+                        "volume": match_volume,
+                        "cost": match_cost,
+                        "buyer_fee": buyer_fee,
+                        "seller_fee": seller_fee,
+                        "counterparty": seller,
+                    })
 
-                volume -= match_volume
-                executed_volume += match_volume
-                total_cost_or_revenue += match_cost
-                total_fee += buyer_fee + seller_fee
-                sell_order.executed += match_volume
+                    volume -= match_volume
+                    executed_volume += match_volume
+                    total_cost_or_revenue += match_cost
+                    total_fee += buyer_fee + seller_fee
+                    sell_order.executed += match_volume
 
-                # 完成订单处理
-                if sell_order.remaining_volume < 0.000001:
-                    if sell_order in seller.orders:
-                        seller.orders.remove(sell_order)
-                    self.sell_orders.remove(sell_order)
+                    # 完成订单处理
+                    if sell_order.remaining_volume < 0.000001:
+                        if sell_order in seller.orders:
+                            seller.orders.remove(sell_order)
+                        self.sell_orders.remove(sell_order)
 
-        else:  # sell
-            # 卖出：与买单簿撮合（市价卖单是Taker，限价买单是Maker）
-            while volume > 0 and self.buy_orders:
-                buy_order = self.buy_orders[0]
-                match_volume = min(volume, buy_order.remaining_volume)
-                match_price = buy_order.price
-                match_revenue = match_volume * match_price
+            else:  # sell
+                # 卖出：与买单簿撮合（市价卖单是Taker，限价买单是Maker）
+                while volume > 0 and self.buy_orders:
+                    buy_order = self.buy_orders[0]
+                    match_volume = min(volume, buy_order.remaining_volume)
+                    match_price = buy_order.price
+                    match_revenue = match_volume * match_price
 
-                # 检查卖家余额
-                available = trader.assets.get(self.base_token, 0.0)
-                if available < match_volume:
-                    if available > 0.000001:
-                        match_volume = available
-                        match_revenue = match_volume * match_price
-                    else:
-                        break
+                    # 检查卖家余额
+                    available = trader.assets.get(self.base_token, 0.0)
+                    if available < match_volume:
+                        if available > 0.000001:
+                            match_volume = available
+                            match_revenue = match_volume * match_price
+                        else:
+                            break
 
-                # 计算手续费
-                seller_fee = self.fee_calculator.calculate(match_revenue, is_taker=True, is_buyer=False)
-                buyer_fee = self.fee_calculator.calculate(match_revenue, is_taker=False, is_buyer=True)
+                    # 计算手续费
+                    seller_fee = self.fee_calculator.calculate(match_revenue, is_taker=True, is_buyer=False)
+                    buyer_fee = self.fee_calculator.calculate(match_revenue, is_taker=False, is_buyer=True)
 
-                seller_net_revenue = match_revenue - seller_fee
-                buyer_cost = match_revenue + buyer_fee
+                    seller_net_revenue = match_revenue - seller_fee
+                    buyer_cost = match_revenue + buyer_fee
 
-                # 执行交易
-                trader.assets[self.base_token] = available - match_volume
-                trader.assets[self.quote_token] = (
-                    trader.assets.get(self.quote_token, 0.0) + seller_net_revenue
-                )
+                    # 执行交易
+                    trader.assets[self.base_token] = available - match_volume
+                    trader.assets[self.quote_token] = (
+                        trader.assets.get(self.quote_token, 0.0) + seller_net_revenue
+                    )
 
-                buyer = buy_order.trader
-                buy_order.remaining_frozen -= buyer_cost
-                buyer.assets[self.base_token] = (
-                    buyer.assets.get(self.base_token, 0.0) + match_volume
-                )
+                    buyer = buy_order.trader
+                    buy_order.remaining_frozen -= buyer_cost
+                    buyer.assets[self.base_token] = (
+                        buyer.assets.get(self.base_token, 0.0) + match_volume
+                    )
 
-                # 收取手续费
-                self.fee_collector.collect(self.quote_token, seller_fee, {
-                    "trader": trader.name,
-                    "direction": "sell",
-                    "is_taker": True,
-                    "volume": match_volume,
-                    "price": match_price
-                })
-                self.fee_collector.collect(self.quote_token, buyer_fee, {
-                    "trader": buyer.name,
-                    "direction": "buy",
-                    "is_taker": False,
-                    "volume": match_volume,
-                    "price": match_price
-                })
+                    # 收取手续费
+                    self.fee_collector.collect(self.quote_token, seller_fee, {
+                        "trader": trader.name,
+                        "direction": "sell",
+                        "is_taker": True,
+                        "volume": match_volume,
+                        "price": match_price
+                    })
+                    self.fee_collector.collect(self.quote_token, buyer_fee, {
+                        "trader": buyer.name,
+                        "direction": "buy",
+                        "is_taker": False,
+                        "volume": match_volume,
+                        "price": match_price
+                    })
 
-                # 记录成交
-                self.log.append((time.time(), match_price, match_volume, buyer_fee, seller_fee))
-                self.price = match_price
+                    # 记录成交
+                    self.log.append((time.time(), match_price, match_volume, buyer_fee, seller_fee))
+                    self.price = match_price
 
-                trade_details.append({
-                    "price": match_price,
-                    "volume": match_volume,
-                    "revenue": match_revenue,
-                    "buyer_fee": buyer_fee,
-                    "seller_fee": seller_fee,
-                    "counterparty": buyer,
-                })
+                    trade_details.append({
+                        "price": match_price,
+                        "volume": match_volume,
+                        "revenue": match_revenue,
+                        "buyer_fee": buyer_fee,
+                        "seller_fee": seller_fee,
+                        "counterparty": buyer,
+                    })
 
-                volume -= match_volume
-                executed_volume += match_volume
-                total_cost_or_revenue += match_revenue
-                total_fee += buyer_fee + seller_fee
-                buy_order.executed += match_volume
+                    volume -= match_volume
+                    executed_volume += match_volume
+                    total_cost_or_revenue += match_revenue
+                    total_fee += buyer_fee + seller_fee
+                    buy_order.executed += match_volume
 
-                # 完成订单处理
-                if buy_order.remaining_volume < 0.000001:
-                    if buy_order in buyer.orders:
-                        buyer.orders.remove(buy_order)
-                    self.buy_orders.remove(buy_order)
+                    # 完成订单处理
+                    if buy_order.remaining_volume < 0.000001:
+                        if buy_order in buyer.orders:
+                            buyer.orders.remove(buy_order)
+                        self.buy_orders.remove(buy_order)
 
-        return executed_volume, trade_details, total_fee
+            return executed_volume, trade_details, total_fee
 
     def _match_orders(self) -> None:
         """
