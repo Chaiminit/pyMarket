@@ -1,47 +1,110 @@
-from typing import Dict, List, Optional, Callable
+"""
+Trader 模块 - 交易者定义
+
+定义金融市场中的交易者实体，管理：
+- 资产持仓 (assets): 各代币的余额
+- 债券持仓 (bonds): 各代币的债券头寸（正为债权，负为债务）
+- 活跃订单 (orders/bond_orders): 当前挂单列表
+
+支持总资产和净资产的计算（按计价代币换算）。
+"""
+
+from typing import Dict, List, Optional, Callable, Tuple, TYPE_CHECKING
+
+from .token import Token
+
+if TYPE_CHECKING:
+    from .trading_pair import TradingPair
+    from .bond_pair import BondTradingPair
+    from .order import Order, BondOrder
 
 
 class Trader:
-    """交易者/机器人"""
+    """
+    交易者类 - 金融市场参与者
 
-    def __init__(self, name: str, trend: float = 0.0, view: float = 0.0):
+    交易者持有资产和债券，可以提交订单参与市场交易。
+    债券系统允许交易者进行借贷：正债券为借出（收利息），
+    负债券为借入（付利息）。
+
+    Attributes:
+        name: 交易者名称/标识
+        assets: 资产持仓映射 {Token: amount}
+        bonds: 债券持仓映射 {Token: amount}（正为债权，负为债务）
+        k: 策略参数
+        orders: 普通订单列表
+        bond_orders: 债券订单列表
+        last_bond_calc_time: 上次债券计算时间
+        is_player: 是否为玩家控制
+        trading_pairs: 可交易的普通交易对列表
+        bond_pairs: 可交易的债券交易对列表
+        _price_converter: 价格转换函数（由Engine注入）
+        _quote_token: 默认计价代币
+
+    Examples:
+        >>> trader = Trader("Alice")
+        >>> trader.add_asset(btc_token, 10.0)
+        >>> total = trader.get_total_assets(usdt_token)
+    """
+
+    def __init__(self, name: str):
+        """
+        创建交易者
+
+        Args:
+            name: 交易者名称
+        """
         self.name = name
-        self.trend = trend
-        self.view = view
-        self.assets: Dict[str, float] = {}
-        self.bonds: Dict[str, float] = {}
+        self.assets: Dict[Token, float] = {}
+        self.bonds: Dict[Token, float] = {}
         self.k = 0.0
-        self.orders = []
-        self.bond_orders = []
-        self.last_bond_calc_time: Dict[str, float] = {}
+        self.orders: List = []
+        self.bond_orders: List = []
+        self.last_bond_calc_time: Dict[Token, float] = {}
         self.is_player = False
-        self.trading_pairs: List[int] = []
-        self.bond_pairs: List[int] = []
+        self.trading_pairs: List["TradingPair"] = []
+        self.bond_pairs: List["BondTradingPair"] = []
 
-        # 价格转换函数，由 Engine 设置
-        self._price_converter: Optional[Callable[[str, float], float]] = None
-        self._quote_token: Optional[str] = None
+        # 价格转换函数，由 Engine 注入
+        self._price_converter: Optional[Callable[[Token, float, Optional[Token]], float]] = None
+        self._quote_token: Optional[Token] = None
 
-    def add_asset(self, token: str, amount: float):
+    def add_asset(self, token: Token, amount: float) -> None:
+        """
+        添加资产到持仓
+
+        Args:
+            token: 代币类型
+            amount: 增加数量
+        """
         self.assets[token] = self.assets.get(token, 0.0) + amount
 
     def set_price_converter(
-        self, converter: Callable[[str, float, Optional[str]], float], quote_token: str
-    ):
-        """设置价格转换函数，用于计算总资产
+        self, converter: Callable[[Token, float, Optional[Token]], float], quote_token: Token
+    ) -> None:
+        """
+        设置价格转换函数，用于计算总资产价值
 
         Args:
-            converter: 价格转换函数，签名应为 (from_token, amount, target_quote=None) -> float
+            converter: 价格转换函数，签名 (from_token, amount, target_quote) -> float
             quote_token: 默认计价代币
         """
         self._price_converter = converter
         self._quote_token = quote_token
 
-    def get_total_assets(self, quote_token: Optional[str] = None) -> float:
-        """计算总资产（以计价代币为单位）
+    def get_total_assets(self, quote_token: Optional[Token] = None) -> float:
+        """
+        计算总资产价值（以计价代币为单位）
+
+        计算包括：
+        - 所有正资产持仓
+        - 所有正债券持仓（借出债权）
 
         Args:
-            quote_token: 指定计价代币，不传则使用默认的 self._quote_token
+            quote_token: 指定计价代币，默认使用 self._quote_token
+
+        Returns:
+            总资产价值（计价代币单位）
         """
         if quote_token is None:
             quote_token = self._quote_token
@@ -50,31 +113,63 @@ class Trader:
 
         total = 0.0
 
-        for token_name, amount in self.assets.items():
+        # 累加资产
+        for token, amount in self.assets.items():
             if amount <= 0:
                 continue
 
-            if token_name == quote_token:
+            if token == quote_token:
                 total += amount
             else:
-                total += self._price_converter(token_name, amount, quote_token)
+                total += self._price_converter(token, amount, quote_token)
 
-        for bond_key, bond_amount in self.bonds.items():
+        # 累加债券债权（正债券）
+        for bond_token, bond_amount in self.bonds.items():
             if bond_amount <= 0:
                 continue
-            token_name = bond_key.replace("BOND-", "")
-            if token_name == quote_token:
+            if bond_token == quote_token:
                 total += bond_amount
             else:
-                total += self._price_converter(token_name, bond_amount, quote_token)
+                total += self._price_converter(bond_token, bond_amount, quote_token)
 
         return total
 
-    def get_net_assets(self, quote_token: Optional[str] = None) -> float:
-        """计算净资产（总资产 - 债券债务）
+    def get_effective_bond(self, token: Token) -> float:
+        """
+        计算有效债券持仓 = bonds持仓 + 订单冻结值
+
+        对于卖单：bonds已预扣负值，加上订单冻结值（正值）相互抵消
+        例如：卖出100，bonds=-100，冻结=100，有效债券=0
+
+        对于买单：bonds不变，冻结资金不影响债券计算
+        例如：买入100，bonds=0，有效债券=0（成交后才变为100）
 
         Args:
-            quote_token: 指定计价代币，不传则使用默认的 self._quote_token
+            token: 债券代币
+
+        Returns:
+            有效债券持仓（正为债权，负为债务）
+        """
+        bond_amt = self.bonds.get(token, 0.0)
+
+        # 加上卖单中冻结的债券值（抵消预扣的负债券）
+        for order in self.bond_orders:
+            if order.bond_pair.token == token and order.direction == "sell":
+                bond_amt += order.remaining_volume
+
+        return bond_amt
+
+    def get_net_assets(self, quote_token: Optional[Token] = None) -> float:
+        """
+        计算净资产 = 总资产 - 债券债务
+
+        债券债务指负债券持仓的绝对值，包括订单中预扣的部分。
+
+        Args:
+            quote_token: 指定计价代币，默认使用 self._quote_token
+
+        Returns:
+            净资产价值（计价代币单位）
         """
         total_assets = self.get_total_assets(quote_token)
 
@@ -85,13 +180,115 @@ class Trader:
 
         liabilities = 0.0
 
-        for bond_key, bond_amount in self.bonds.items():
-            if bond_amount < 0:
-                token_name = bond_key.replace("BOND-", "")
-                liability_value = abs(bond_amount)
-                if token_name == quote_token:
+        # 累加债券债务（使用有效债券持仓）
+        # 获取所有相关的债券代币
+        bond_tokens = set(self.bonds.keys())
+        for order in self.bond_orders:
+            bond_tokens.add(order.bond_pair.token)
+
+        for bond_token in bond_tokens:
+            effective_bond = self.get_effective_bond(bond_token)
+            if effective_bond < 0:
+                liability_value = abs(effective_bond)
+                if bond_token == quote_token:
                     liabilities += liability_value
                 else:
-                    liabilities += self._price_converter(token_name, liability_value, quote_token)
+                    liabilities += self._price_converter(bond_token, liability_value, quote_token)
 
         return total_assets - liabilities
+
+    # ====== 交易接口 ======
+
+    def submit_limit_order(self, pair: "TradingPair", direction: str, price: float, volume: float) -> bool:
+        """
+        提交普通限价单
+
+        Args:
+            pair: 交易对
+            direction: 'buy' 或 'sell'
+            price: 限价
+            volume: 数量
+
+        Returns:
+            是否提交成功（资金/资产充足时成功）
+        """
+        if direction == "buy":
+            required = price * volume
+            available = self.assets.get(pair.quote_token, 0.0)
+            if available < required:
+                return False
+            self.assets[pair.quote_token] = available - required
+            pair.submit_limit_order(self, direction, price, volume, required)
+        else:  # sell
+            available = self.assets.get(pair.base_token, 0.0)
+            if available < volume:
+                return False
+            self.assets[pair.base_token] = available - volume
+            pair.submit_limit_order(self, direction, price, volume, volume)
+
+        return True
+
+    def submit_market_order(self, pair: "TradingPair", direction: str, volume: float) -> Tuple[float, List[Dict]]:
+        """
+        提交普通市价单
+
+        Args:
+            pair: 交易对
+            direction: 'buy' 或 'sell'
+            volume: 数量
+
+        Returns:
+            (实际成交量, 成交明细列表)
+        """
+        return pair.execute_market_order(self, direction, volume)
+
+    def submit_bond_limit_order(self, bond_pair: "BondTradingPair", direction: str,
+                                 interest_rate: float, volume: float) -> bool:
+        """
+        提交债券限价单
+
+        债券方向说明：
+        - 买单（buy）：借出资金，支付代币，获得正债券（债权）
+        - 卖单（sell）：借入资金，获得代币，获得负债券（债务）
+
+        Args:
+            bond_pair: 债券交易对
+            direction: 'buy' 或 'sell'
+            interest_rate: 目标利率
+            volume: 债券数量
+
+        Returns:
+            是否提交成功
+        """
+        if direction == "buy":
+            # 买单：需要预先拥有代币来借出资金
+            available = self.assets.get(bond_pair.token, 0.0)
+            if available < volume:
+                return False
+            self.assets[bond_pair.token] = available - volume
+            bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
+        else:  # sell
+            # 卖单：借入资金，冻结债务额度（负债券）
+            # 成交后会获得代币和负债券（债务）
+            self.bonds[bond_pair.token] = self.bonds.get(bond_pair.token, 0.0) - volume
+            bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
+
+        return True
+
+    def cancel_order(self, order: "Order") -> bool:
+        """
+        取消订单
+
+        Args:
+            order: Order或BondOrder实例
+
+        Returns:
+            是否成功取消（不可取消的订单返回False）
+        """
+        if order and not order.cancelled:
+            # 检查订单是否可手动取消
+            if hasattr(order, 'cancellable') and not order.cancellable:
+                return False
+            order.close()
+            return True
+        return False
