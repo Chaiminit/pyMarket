@@ -10,8 +10,10 @@ Trader 模块 - 交易者定义
 """
 
 from typing import Dict, List, Optional, Callable, Tuple, Any, TYPE_CHECKING
+from decimal import Decimal
 
 from .token import Token
+from .utils import to_decimal, D0, D1
 
 if TYPE_CHECKING:
     from .trading_pair import TradingPair
@@ -56,9 +58,9 @@ class Trader:
             name: 交易者名称
         """
         self.name = name
-        self.assets: Dict[Token, float] = {}
-        self.bonds: Dict[Token, float] = {}
-        self.k = 0.0
+        self.assets: Dict[Token, Decimal] = {}
+        self.bonds: Dict[Token, Decimal] = {}
+        self.k = D0
         self.orders: List = []
         self.bond_orders: List = []
         self.last_bond_calc_time: Dict[Token, float] = {}
@@ -67,10 +69,10 @@ class Trader:
         self.bond_pairs: List["BondTradingPair"] = []
 
         # 价格转换函数，由 Engine 注入
-        self._price_converter: Optional[Callable[[Token, float, Optional[Token]], float]] = None
+        self._price_converter: Optional[Callable[[Token, Decimal, Optional[Token]], Decimal]] = None
         self._quote_token: Optional[Token] = None
 
-    def add_asset(self, token: Token, amount: float) -> None:
+    def add_asset(self, token: Token, amount) -> None:
         """
         添加资产到持仓
 
@@ -78,22 +80,22 @@ class Trader:
             token: 代币类型
             amount: 增加数量
         """
-        self.assets[token] = self.assets.get(token, 0.0) + amount
+        self.assets[token] = self.assets.get(token, D0) + to_decimal(amount)
 
     def set_price_converter(
-        self, converter: Callable[[Token, float, Optional[Token]], float], quote_token: Token
+        self, converter: Callable[[Token, Decimal, Optional[Token]], Decimal], quote_token: Token
     ) -> None:
         """
         设置价格转换函数，用于计算总资产价值
 
         Args:
-            converter: 价格转换函数，签名 (from_token, amount, target_quote) -> float
+            converter: 价格转换函数，签名 (from_token, amount, target_quote) -> Decimal
             quote_token: 默认计价代币
         """
         self._price_converter = converter
         self._quote_token = quote_token
 
-    def get_total_assets(self, quote_token: Optional[Token] = None) -> float:
+    def get_total_assets(self, quote_token: Optional[Token] = None) -> Decimal:
         """
         计算总资产价值（以计价代币为单位）
 
@@ -110,13 +112,13 @@ class Trader:
         if quote_token is None:
             quote_token = self._quote_token
         if quote_token is None or self._price_converter is None:
-            return sum(max(0, amount) for amount in self.assets.values())
+            return sum((amount for amount in self.assets.values() if amount > D0), D0)
 
-        total = 0.0
+        total = D0
 
         # 累加资产
         for token, amount in self.assets.items():
-            if amount <= 0:
+            if amount <= D0:
                 continue
 
             if token == quote_token:
@@ -126,7 +128,7 @@ class Trader:
 
         # 累加债券债权（正债券）
         for bond_token, bond_amount in self.bonds.items():
-            if bond_amount <= 0:
+            if bond_amount <= D0:
                 continue
             if bond_token == quote_token:
                 total += bond_amount
@@ -135,7 +137,7 @@ class Trader:
 
         return total
 
-    def get_effective_bond(self, token: Token) -> float:
+    def get_effective_bond(self, token: Token) -> Decimal:
         """
         计算有效债券持仓 = bonds持仓 + 订单冻结值
 
@@ -151,7 +153,7 @@ class Trader:
         Returns:
             有效债券持仓（正为债权，负为债务）
         """
-        bond_amt = self.bonds.get(token, 0.0)
+        bond_amt = self.bonds.get(token, D0)
 
         # 加上卖单中冻结的债券值（抵消预扣的负债券）
         for order in self.bond_orders:
@@ -160,7 +162,7 @@ class Trader:
 
         return bond_amt
 
-    def get_net_assets(self, quote_token: Optional[Token] = None) -> float:
+    def get_net_assets(self, quote_token: Optional[Token] = None) -> Decimal:
         """
         计算净资产 = 总资产 - 债券债务
 
@@ -179,7 +181,7 @@ class Trader:
         if quote_token is None or self._price_converter is None:
             return total_assets
 
-        liabilities = 0.0
+        liabilities = D0
 
         # 累加债券债务（使用有效债券持仓）
         # 获取所有相关的债券代币
@@ -189,7 +191,7 @@ class Trader:
 
         for bond_token in bond_tokens:
             effective_bond = self.get_effective_bond(bond_token)
-            if effective_bond < 0:
+            if effective_bond < D0:
                 liability_value = abs(effective_bond)
                 if bond_token == quote_token:
                     liabilities += liability_value
@@ -200,7 +202,7 @@ class Trader:
 
     # ====== 交易接口 ======
 
-    def submit_limit_order(self, pair: "TradingPair", direction: str, price: float, volume: float) -> bool:
+    def submit_limit_order(self, pair: "TradingPair", direction: str, price, volume) -> bool:
         """
         提交普通限价单
 
@@ -218,18 +220,20 @@ class Trader:
         """
         from .fees import FeeDirection
 
+        price = to_decimal(price)
+        volume = to_decimal(volume)
         fee_config = pair.get_fee_config()
 
         if direction == "buy":
             trade_amount = price * volume
 
             # 计算预估手续费（按最坏情况Taker费率）
-            estimated_fee = 0.0
+            estimated_fee = D0
             if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
                 estimated_fee = trade_amount * fee_config.taker_rate
 
             total_required = trade_amount + estimated_fee
-            available = self.assets.get(pair.quote_token, 0.0)
+            available = self.assets.get(pair.quote_token, D0)
 
             if available < total_required:
                 return False
@@ -238,7 +242,7 @@ class Trader:
             pair.submit_limit_order(self, direction, price, volume, total_required)
         else:  # sell
             # 卖单冻结资产，手续费从成交所得中扣除
-            available = self.assets.get(pair.base_token, 0.0)
+            available = self.assets.get(pair.base_token, D0)
             if available < volume:
                 return False
             self.assets[pair.base_token] = available - volume
@@ -246,7 +250,7 @@ class Trader:
 
         return True
 
-    def submit_market_order(self, pair: "TradingPair", direction: str, volume: float) -> Tuple[float, List[Dict], float]:
+    def submit_market_order(self, pair: "TradingPair", direction: str, volume) -> Tuple[Decimal, List[Dict], Decimal]:
         """
         提交普通市价单（按标的代币数量）
 
@@ -260,7 +264,7 @@ class Trader:
         """
         return pair.execute_market_order(self, direction, volume)
 
-    def submit_market_order_by_quote(self, pair: "TradingPair", direction: str, quote_amount: float) -> Tuple[float, List[Dict], float]:
+    def submit_market_order_by_quote(self, pair: "TradingPair", direction: str, quote_amount) -> Tuple[Decimal, List[Dict], Decimal]:
         """
         提交普通市价单（按计价代币金额）
 
@@ -275,6 +279,8 @@ class Trader:
         Returns:
             (实际成交量, 成交明细列表, 总手续费)
         """
+        quote_amount = to_decimal(quote_amount)
+
         if direction == "buy":
             # 买入：计算能用 quote_amount 买到多少标的代币
             # 需要考虑手续费，实际可用于购买的资金会减少
@@ -282,12 +288,12 @@ class Trader:
             from .fees import FeeDirection
 
             # 预估手续费（按最坏情况Taker费率）
-            estimated_fee_rate = 0.0
+            estimated_fee_rate = D0
             if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
                 estimated_fee_rate = fee_config.taker_rate
 
             # 实际可用于购买的资金 = 总金额 / (1 + 手续费率)
-            available_for_trade = quote_amount / (1 + estimated_fee_rate) if estimated_fee_rate > 0 else quote_amount
+            available_for_trade = quote_amount / (D1 + estimated_fee_rate) if estimated_fee_rate > D0 else quote_amount
             volume = available_for_trade / pair.price
         else:
             # 卖出：计算需要卖出多少标的代币才能获得 quote_amount
@@ -296,18 +302,18 @@ class Trader:
             from .fees import FeeDirection
 
             # 预估手续费率
-            estimated_fee_rate = 0.0
+            estimated_fee_rate = D0
             if fee_config.direction in (FeeDirection.SELLER, FeeDirection.BOTH):
                 estimated_fee_rate = fee_config.taker_rate
 
             # 需要卖出的标的代币价值 = 期望获得金额 / (1 - 手续费率)
-            required_value = quote_amount / (1 - estimated_fee_rate) if estimated_fee_rate > 0 and estimated_fee_rate < 1 else quote_amount
+            required_value = quote_amount / (D1 - estimated_fee_rate) if estimated_fee_rate > D0 and estimated_fee_rate < D1 else quote_amount
             volume = required_value / pair.price
 
         return pair.execute_market_order(self, direction, volume)
 
     def submit_bond_limit_order(self, bond_pair: "BondTradingPair", direction: str,
-                                 interest_rate: float, volume: float) -> bool:
+                                 interest_rate, volume) -> bool:
         """
         提交债券限价单
 
@@ -328,18 +334,20 @@ class Trader:
         """
         from .fees import FeeDirection
 
+        interest_rate = to_decimal(interest_rate)
+        volume = to_decimal(volume)
         fee_config = bond_pair.get_fee_config()
 
         if direction == "buy":
             # 买单：需要预先拥有代币来借出资金
 
             # 计算预估手续费（按最坏情况Taker费率）
-            estimated_fee = 0.0
+            estimated_fee = D0
             if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
                 estimated_fee = volume * fee_config.taker_rate
 
             total_required = volume + estimated_fee
-            available = self.assets.get(bond_pair.token, 0.0)
+            available = self.assets.get(bond_pair.token, D0)
 
             if available < total_required:
                 return False
@@ -349,7 +357,7 @@ class Trader:
         else:  # sell
             # 卖单：借入资金，冻结债务额度（负债券）
             # 成交后会获得代币和负债券（债务），手续费从所得中扣除
-            self.bonds[bond_pair.token] = self.bonds.get(bond_pair.token, 0.0) - volume
+            self.bonds[bond_pair.token] = self.bonds.get(bond_pair.token, D0) - volume
             bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
 
         return True

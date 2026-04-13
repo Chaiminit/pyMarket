@@ -19,11 +19,13 @@ import math
 import random
 from typing import List, Dict, Tuple, Optional, Set
 from threading import Lock
+from decimal import Decimal
 
 from .trader import Trader
 from .order import Order
 from .token import Token
 from .fees import FeeConfig, FeeCalculator, FeeCollector
+from .utils import to_decimal, D0, D1
 
 
 class TradingPair:
@@ -56,7 +58,7 @@ class TradingPair:
         self,
         base_token: Token,
         quote_token: Token,
-        initial_price: float,
+        initial_price,
         fee_config: Optional[FeeConfig] = None
     ):
         """
@@ -70,8 +72,8 @@ class TradingPair:
         """
         self.base_token = base_token
         self.quote_token = quote_token
-        self.price = initial_price
-        self.log: List[Tuple[float, float, float, float, float]] = []
+        self.price = to_decimal(initial_price)
+        self.log: List[Tuple[float, Decimal, Decimal, Decimal, Decimal]] = []
         self.buy_orders: List[Order] = []
         self.sell_orders: List[Order] = []
         self.clients: Set[Trader] = set()
@@ -104,7 +106,7 @@ class TradingPair:
         """
         return self.fee_config
 
-    def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]:
+    def get_collected_fees(self, token: Optional[Token] = None):
         """
         获取已收集的手续费
 
@@ -117,7 +119,7 @@ class TradingPair:
         return self.fee_collector.get_collected(token)
 
     def submit_limit_order(
-        self, trader: Trader, direction: str, price: float, volume: float, frozen_amount: float
+        self, trader: Trader, direction: str, price, volume, frozen_amount
     ) -> None:
         """
         提交限价单到订单簿（线程安全）
@@ -152,8 +154,8 @@ class TradingPair:
             self._match_orders()
 
     def execute_market_order(
-        self, trader: Trader, direction: str, volume: float
-    ) -> Tuple[float, List[Dict], float]:
+        self, trader: Trader, direction: str, volume
+    ) -> Tuple[Decimal, List[Dict], Decimal]:
         """
         执行市价单 - 立即以最优价格成交（线程安全）
 
@@ -169,18 +171,19 @@ class TradingPair:
             (实际成交量, 成交明细列表, 总手续费)
             成交明细包含: price, volume, cost/revenue, counterparty, buyer_fee, seller_fee
         """
-        if volume <= 0:
-            return 0.0, [], 0.0
+        volume = to_decimal(volume)
+        if volume <= D0:
+            return D0, [], D0
 
         with self._lock:
-            executed_volume = 0.0
-            total_cost_or_revenue = 0.0
-            total_fee = 0.0
+            executed_volume = D0
+            total_cost_or_revenue = D0
+            total_fee = D0
             trade_details: List[Dict] = []
 
             if direction == "buy":
                 # 买入：与卖单簿撮合（市价买单是Taker，限价卖单是Maker）
-                while volume > 0 and self.sell_orders:
+                while volume > D0 and self.sell_orders:
                     sell_order = self.sell_orders[0]
                     match_volume = min(volume, sell_order.remaining_volume)
                     match_price = sell_order.price
@@ -190,14 +193,14 @@ class TradingPair:
                     buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True)
                     total_required = match_cost + buyer_fee
 
-                    available = trader.assets.get(self.quote_token, 0.0)
+                    available = trader.assets.get(self.quote_token, D0)
                     if available < total_required:
-                        if available > 0:
+                        if available > D0:
                             # 重新计算可购买的量（考虑手续费）
-                            fee_rate = buyer_fee / match_cost if match_cost > 0 else 0
-                            max_cost = available / (1 + fee_rate) if fee_rate > 0 else available
+                            fee_rate = buyer_fee / match_cost if match_cost > D0 else D0
+                            max_cost = available / (D1 + fee_rate) if fee_rate > D0 else available
                             max_buy_volume = max_cost / match_price
-                            if max_buy_volume > 0.000001:
+                            if max_buy_volume > D0:
                                 match_volume = min(match_volume, max_buy_volume)
                                 match_cost = match_volume * match_price
                                 buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True)
@@ -214,13 +217,13 @@ class TradingPair:
                     # 执行交易
                     trader.assets[self.quote_token] = available - total_required
                     trader.assets[self.base_token] = (
-                        trader.assets.get(self.base_token, 0.0) + match_volume
+                        trader.assets.get(self.base_token, D0) + match_volume
                     )
 
                     seller = sell_order.trader
                     sell_order.remaining_frozen -= match_volume
                     seller.assets[self.quote_token] = (
-                        seller.assets.get(self.quote_token, 0.0) + seller_revenue
+                        seller.assets.get(self.quote_token, D0) + seller_revenue
                     )
 
                     # 收取手续费
@@ -259,23 +262,23 @@ class TradingPair:
                     sell_order.executed += match_volume
 
                     # 完成订单处理
-                    if sell_order.remaining_volume < 0.000001:
+                    if sell_order.remaining_volume <= D0:
                         if sell_order in seller.orders:
                             seller.orders.remove(sell_order)
                         self.sell_orders.remove(sell_order)
 
             else:  # sell
                 # 卖出：与买单簿撮合（市价卖单是Taker，限价买单是Maker）
-                while volume > 0 and self.buy_orders:
+                while volume > D0 and self.buy_orders:
                     buy_order = self.buy_orders[0]
                     match_volume = min(volume, buy_order.remaining_volume)
                     match_price = buy_order.price
                     match_revenue = match_volume * match_price
 
                     # 检查卖家余额
-                    available = trader.assets.get(self.base_token, 0.0)
+                    available = trader.assets.get(self.base_token, D0)
                     if available < match_volume:
-                        if available > 0.000001:
+                        if available > D0:
                             match_volume = available
                             match_revenue = match_volume * match_price
                         else:
@@ -291,13 +294,13 @@ class TradingPair:
                     # 执行交易
                     trader.assets[self.base_token] = available - match_volume
                     trader.assets[self.quote_token] = (
-                        trader.assets.get(self.quote_token, 0.0) + seller_net_revenue
+                        trader.assets.get(self.quote_token, D0) + seller_net_revenue
                     )
 
                     buyer = buy_order.trader
                     buy_order.remaining_frozen -= buyer_cost
                     buyer.assets[self.base_token] = (
-                        buyer.assets.get(self.base_token, 0.0) + match_volume
+                        buyer.assets.get(self.base_token, D0) + match_volume
                     )
 
                     # 收取手续费
@@ -336,7 +339,7 @@ class TradingPair:
                     buy_order.executed += match_volume
 
                     # 完成订单处理
-                    if buy_order.remaining_volume < 0.000001:
+                    if buy_order.remaining_volume <= D0:
                         if buy_order in buyer.orders:
                             buyer.orders.remove(buy_order)
                         self.buy_orders.remove(buy_order)
@@ -385,9 +388,9 @@ class TradingPair:
                 continue
 
             # 检查卖家资产
-            seller_base = seller.assets.get(self.base_token, 0.0)
+            seller_base = seller.assets.get(self.base_token, D0)
             if seller_base < match_volume:
-                if seller_base <= 0:
+                if seller_base <= D0:
                     # 资产不足，强制取消卖单
                     best_sell.close(force=True)
                     continue
@@ -408,12 +411,12 @@ class TradingPair:
             # 执行交易
             # 从冻结资金中扣除成本，剩余部分（包括多余冻结的手续费）会返还
             buyer.assets[self.base_token] = (
-                buyer.assets.get(self.base_token, 0.0) + match_volume
+                buyer.assets.get(self.base_token, D0) + match_volume
             )
 
             seller.assets[self.base_token] = seller_base - match_volume
             seller.assets[self.quote_token] = (
-                seller.assets.get(self.quote_token, 0.0) + seller_revenue
+                seller.assets.get(self.quote_token, D0) + seller_revenue
             )
 
             best_buy.remaining_frozen -= total_buyer_cost
@@ -423,8 +426,8 @@ class TradingPair:
             best_sell.executed += match_volume
 
             # 返还多冻结的手续费到买家资产
-            if excess_frozen > 0.000001:
-                buyer.assets[self.quote_token] = buyer.assets.get(self.quote_token, 0.0) + excess_frozen
+            if excess_frozen > D0:
+                buyer.assets[self.quote_token] = buyer.assets.get(self.quote_token, D0) + excess_frozen
 
             # 收取手续费
             self.fee_collector.collect(self.quote_token, buyer_fee, {
@@ -447,17 +450,17 @@ class TradingPair:
             self.price = match_price
 
             # 完成订单处理
-            if best_buy.remaining_volume < 0.000001:
+            if best_buy.remaining_volume <= D0:
                 if best_buy in buyer.orders:
                     buyer.orders.remove(best_buy)
                 self.buy_orders.remove(best_buy)
 
-            if best_sell.remaining_volume < 0.000001:
+            if best_sell.remaining_volume <= D0:
                 if best_sell in seller.orders:
                     seller.orders.remove(best_sell)
                 self.sell_orders.remove(best_sell)
 
-    def get_order_book(self, depth: int = 10) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+    def get_order_book(self, depth: int = 10) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
         """
         获取订单簿快照
 
@@ -471,7 +474,7 @@ class TradingPair:
         sells = [(order.price, order.remaining_volume) for order in self.sell_orders[:depth]]
         return buys, sells
 
-    def get_market_depth(self) -> Dict[str, float]:
+    def get_market_depth(self) -> Dict[str, Decimal]:
         """
         获取市场深度统计
 

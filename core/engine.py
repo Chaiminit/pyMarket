@@ -16,6 +16,7 @@ import time
 import math
 import random
 from typing import List, Dict, Tuple, Optional, Set
+from decimal import Decimal
 
 from .trading_pair import TradingPair
 from .bond_pair import BondTradingPair
@@ -24,6 +25,7 @@ from .token import Token
 from .liquidation import LiquidationEngine, LiquidationResult
 from .fees import FeeConfig
 from .corp import Corp
+from .utils import to_decimal, D0
 
 
 class MarketEngine:
@@ -59,6 +61,7 @@ class MarketEngine:
         self.traders: List[Trader] = []
         self._quote_token: Optional[Token] = None
         self._step_counter = 0
+        self._last_step_time: Optional[float] = None  # 上次调用 step 的时间戳
         self._liquidation_engine = LiquidationEngine(self)
 
         # 全局默认手续费配置（默认为零手续费）
@@ -127,7 +130,7 @@ class MarketEngine:
 
     # ====== 普通交易对 ======
 
-    def create_trading_pair(self, base_token_name: str, quote_token_name: str, initial_price: float, fee_config: Optional[FeeConfig] = None) -> TradingPair:
+    def create_trading_pair(self, base_token_name: str, quote_token_name: str, initial_price, fee_config: Optional[FeeConfig] = None) -> TradingPair:
         """
         创建普通交易对
 
@@ -159,7 +162,7 @@ class MarketEngine:
 
     # ====== 债券交易对 ======
 
-    def create_bond_trading_pair(self, token_name: str, initial_rate: float, fee_config: Optional[FeeConfig] = None) -> BondTradingPair:
+    def create_bond_trading_pair(self, token_name: str, initial_rate, fee_config: Optional[FeeConfig] = None) -> BondTradingPair:
         """
         创建债券交易对
 
@@ -218,8 +221,8 @@ class MarketEngine:
     def create_corp(
         self,
         name: str,
-        total_shares: float,
-        initial_price: float,
+        total_shares,
+        initial_price,
         quote_token: Token
     ) -> Corp:
         """
@@ -255,7 +258,7 @@ class MarketEngine:
 
         return corp
 
-    def allocate_assets(self, trader: Trader, token: Token, amount: float) -> None:
+    def allocate_assets(self, trader: Trader, token: Token, amount) -> None:
         """
         分配资产给交易者
 
@@ -276,7 +279,7 @@ class MarketEngine:
 
     # ====== 价格转换 ======
 
-    def _convert_price(self, from_token: Token, amount: float, target_quote: Optional[Token] = None) -> float:
+    def _convert_price(self, from_token: Token, amount, target_quote: Optional[Token] = None) -> Decimal:
         """
         转换代币价格到目标计价代币
 
@@ -290,6 +293,8 @@ class MarketEngine:
         Returns:
             转换后的价值，无法转换返回0
         """
+        amount = to_decimal(amount)
+
         if target_quote is None:
             target_quote = self._quote_token
 
@@ -301,10 +306,10 @@ class MarketEngine:
             if pair.base_token == from_token and pair.quote_token == target_quote:
                 return amount * pair.price
             if pair.base_token == target_quote and pair.quote_token == from_token:
-                return amount / pair.price if pair.price > 0 else 0
+                return amount / pair.price if pair.price > D0 else D0
 
         # 无法直接转换
-        return 0
+        return D0
 
     # ====== 市场模拟 ======
 
@@ -313,17 +318,28 @@ class MarketEngine:
         执行一步市场模拟
 
         当前执行的操作：
-        - 结算所有债券交易对的利息
+        - 结算所有债券交易对的利息（基于距离上次调用的时间）
         - 处理破产清算
         """
         self._step_counter += 1
+
+        # 计算距离上次调用的时间（年化单位）
+        current_time = time.time()
+        if self._last_step_time is None:
+            # 首次调用，不结算利息（dt=0）
+            dt = D0
+        else:
+            # 计算实际经过的时间（秒）并转换为年化
+            elapsed_seconds = current_time - self._last_step_time
+            dt = Decimal(str(elapsed_seconds)) / Decimal('31536000')  # 365天 = 31536000秒
+        self._last_step_time = current_time
 
         # 结算债券利息
         if self.traders and self.bond_trading_pairs:
             traders_set = set(self.traders)
 
             for bp in self.bond_trading_pairs:
-                bp.settle_interest_simple(traders_set, 0.1)
+                bp.settle_interest_simple(traders_set, dt)
 
         # 处理破产清算
         self.process_liquidations()
@@ -419,28 +435,28 @@ class MarketEngine:
         """
         return self._default_bond_fee_config
 
-    def get_all_collected_fees(self) -> Dict[Token, float]:
+    def get_all_collected_fees(self) -> Dict[Token, Decimal]:
         """
         获取所有交易对收集的手续费总额
 
         Returns:
             {Token: 手续费金额}
         """
-        total_fees: Dict[Token, float] = {}
+        total_fees: Dict[Token, Decimal] = {}
 
         # 汇总现货交易手续费
         for pair in self.trading_pairs:
             fees = pair.get_collected_fees()
             if isinstance(fees, dict):
                 for token, amount in fees.items():
-                    total_fees[token] = total_fees.get(token, 0.0) + amount
+                    total_fees[token] = total_fees.get(token, D0) + amount
 
         # 汇总债券交易手续费
         for bond_pair in self.bond_trading_pairs:
             fees = bond_pair.get_collected_fees()
             if isinstance(fees, dict):
                 for token, amount in fees.items():
-                    total_fees[token] = total_fees.get(token, 0.0) + amount
+                    total_fees[token] = total_fees.get(token, D0) + amount
 
         return total_fees
 

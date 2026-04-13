@@ -56,6 +56,7 @@ from .governance import (
     VoteRecord,
     VoteStatus,
 )
+from .utils import to_decimal, d, D0, D1
 
 __all__ = [
     # 引擎
@@ -87,4 +88,9 @@ __all__ = [
     "GovernanceSystem",
     "VoteRecord",
     "VoteStatus",
+    # 工具函数
+    "to_decimal",
+    "d",
+    "D0",
+    "D1",
 ]

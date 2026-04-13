@@ -22,11 +22,13 @@ import time
 import math
 from typing import Dict, Set, List, Tuple, Optional, TYPE_CHECKING
 from threading import Lock
+from decimal import Decimal
 
 from .trader import Trader
 from .order import BondOrder
 from .token import Token
 from .fees import FeeConfig, FeeCalculator, FeeCollector
+from .utils import to_decimal, D0, D1
 
 if TYPE_CHECKING:
     pass
@@ -61,7 +63,7 @@ class BondTradingPair:
         >>> insolvent = bond_pair.settle_interest_simple(traders, dt=0.1)
     """
 
-    def __init__(self, token: Token, initial_rate: float, fee_config: Optional[FeeConfig] = None):
+    def __init__(self, token: Token, initial_rate, fee_config: Optional[FeeConfig] = None):
         """
         创建债券交易对
 
@@ -71,8 +73,8 @@ class BondTradingPair:
             fee_config: 手续费配置，默认零手续费
         """
         self.token = token
-        self.current_rate = initial_rate
-        self.log: List[Tuple[float, float, float, float, float]] = []
+        self.current_rate = to_decimal(initial_rate)
+        self.log: List[Tuple[float, Decimal, Decimal, Decimal, Decimal]] = []
         self.buy_orders: List[BondOrder] = []
         self.sell_orders: List[BondOrder] = []
         self.clients: Set[Trader] = set()
@@ -105,7 +107,7 @@ class BondTradingPair:
         """
         return self.fee_config
 
-    def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]:
+    def get_collected_fees(self, token: Optional[Token] = None):
         """
         获取已收集的手续费
 
@@ -117,7 +119,7 @@ class BondTradingPair:
         """
         return self.fee_collector.get_collected(token)
 
-    def get_total_bonds(self, traders: Set[Trader]) -> float:
+    def get_total_bonds(self, traders: Set[Trader]) -> Decimal:
         """
         统计所有交易者的债券持仓总和
 
@@ -127,14 +129,14 @@ class BondTradingPair:
         Returns:
             债券总持仓（正债权 - 负债务的净值）
         """
-        total = 0.0
+        total = D0
         for trader in traders:
-            total += trader.bonds.get(self.token, 0.0)
+            total += trader.bonds.get(self.token, D0)
         return total
 
     def settle_interest_simple(
-        self, traders: Set[Trader], dt: float
-    ) -> List[Tuple[Trader, float]]:
+        self, traders: Set[Trader], dt
+    ) -> List[Tuple[Trader, Decimal]]:
         """
         简单高频利息结算
 
@@ -152,15 +154,16 @@ class BondTradingPair:
         Returns:
             无法足额支付利息的债务人列表 [(trader, 缺口金额), ...]
         """
-        insolvent_debtors: List[Tuple[Trader, float]] = []
+        dt = to_decimal(dt)
+        insolvent_debtors: List[Tuple[Trader, Decimal]] = []
 
-        if self.current_rate == 0 or dt <= 0:
+        if self.current_rate == D0 or dt <= D0:
             return insolvent_debtors
 
-        creditors: List[Tuple[Trader, float]] = []  # (交易者, 有效债权)
-        debtors: List[Tuple[Trader, float]] = []    # (交易者, 有效债务)
-        total_positive = 0.0
-        total_negative = 0.0
+        creditors: List[Tuple[Trader, Decimal]] = []  # (交易者, 有效债权)
+        debtors: List[Tuple[Trader, Decimal]] = []    # (交易者, 有效债务)
+        total_positive = D0
+        total_negative = D0
 
         # 分类债权人和债务人
         for trader in traders:
@@ -168,37 +171,37 @@ class BondTradingPair:
             # 有效债券 = bonds持仓 + 订单冻结值
             effective_bond = trader.get_effective_bond(self.token)
 
-            if abs(effective_bond) < 0.000001:
+            if abs(effective_bond) <= D0:
                 continue
 
-            if effective_bond > 0.000001:
+            if effective_bond > D0:
                 creditors.append((trader, effective_bond))
                 total_positive += effective_bond
-            elif effective_bond < -0.000001:
+            elif effective_bond < D0:
                 debtors.append((trader, -effective_bond))
                 total_negative += -effective_bond
 
         # 没有对手方，无需结算
-        if total_positive < 0.000001 or total_negative < 0.000001:
+        if total_positive <= D0 or total_negative <= D0:
             return insolvent_debtors
 
         # 计算总利息（基于有效债券基数）
         effective_bonds = min(total_positive, total_negative)
         total_interest = effective_bonds * self.current_rate * dt
 
-        if total_interest < 0.000001:
+        if total_interest <= D0:
             return insolvent_debtors
 
         # 从债务人收取利息
-        collected = 0.0
+        collected = D0
         for debtor, debt_amt in debtors:
             ratio = debt_amt / total_negative
             interest_to_pay = total_interest * ratio
 
-            available = debtor.assets.get(self.token, 0.0)
+            available = debtor.assets.get(self.token, D0)
             actual_pay = min(interest_to_pay, available)
 
-            if actual_pay > 0:
+            if actual_pay > D0:
                 debtor.assets[self.token] -= actual_pay
                 collected += actual_pay
 
@@ -207,12 +210,12 @@ class BondTradingPair:
                 insolvent_debtors.append((debtor, shortfall))
 
         # 将收到的利息支付给债权人
-        if collected > 0.000001:
+        if collected > D0:
             for creditor, credit_amt in creditors:
                 ratio = credit_amt / total_positive
                 interest_to_receive = collected * ratio
                 creditor.assets[self.token] = (
-                    creditor.assets.get(self.token, 0.0) + interest_to_receive
+                    creditor.assets.get(self.token, D0) + interest_to_receive
                 )
 
         return insolvent_debtors
@@ -221,9 +224,9 @@ class BondTradingPair:
         self,
         trader: Trader,
         direction: str,
-        interest_rate: float,
-        volume: float,
-        frozen_amount: float,
+        interest_rate,
+        volume,
+        frozen_amount,
     ) -> None:
         """
         提交债券限价单（线程安全）
@@ -303,12 +306,12 @@ class BondTradingPair:
             # 执行债券交易
             # 买家（买单）：借出资金，获得正债券（债权）
             # 注意：资金已从冻结中扣除，这里只需获得正债券
-            buyer.bonds[self.token] = buyer.bonds.get(self.token, 0.0) + match_volume
+            buyer.bonds[self.token] = buyer.bonds.get(self.token, D0) + match_volume
 
             # 卖家（卖单）：借入资金，获得代币，获得负债券（债务）
             # 注意：卖单提交时已冻结负债券，这里只需释放冻结并获得代币（扣除手续费）
             seller.assets[self.token] = (
-                seller.assets.get(self.token, 0.0) + match_volume - seller_fee
+                seller.assets.get(self.token, D0) + match_volume - seller_fee
             )
 
             # 收取手续费
@@ -339,25 +342,25 @@ class BondTradingPair:
             best_sell.executed += match_volume
 
             # 返还多冻结的手续费到买家资产
-            if excess_frozen > 0.000001:
-                buyer.assets[self.token] = buyer.assets.get(self.token, 0.0) + excess_frozen
+            if excess_frozen > D0:
+                buyer.assets[self.token] = buyer.assets.get(self.token, D0) + excess_frozen
 
             # 记录成交（包含手续费）
             self.log.append((time.time(), match_rate, match_volume, buyer_fee, seller_fee))
             self.current_rate = match_rate
 
             # 完成订单处理
-            if best_buy.remaining_volume < 0.000001:
+            if best_buy.remaining_volume <= D0:
                 if best_buy in buyer.bond_orders:
                     buyer.bond_orders.remove(best_buy)
                 self.buy_orders.remove(best_buy)
 
-            if best_sell.remaining_volume < 0.000001:
+            if best_sell.remaining_volume <= D0:
                 if best_sell in seller.bond_orders:
                     seller.bond_orders.remove(best_sell)
                 self.sell_orders.remove(best_sell)
 
-    def get_order_book(self, depth: int = 10) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+    def get_order_book(self, depth: int = 10) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
         """
         获取债券订单簿快照
 

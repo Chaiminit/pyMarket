@@ -17,10 +17,13 @@ Corp 模块 - 股份公司类
 """
 
 from typing import Tuple, Optional, Dict, List
+from decimal import Decimal
+
 from .trader import Trader
 from .token import Token
 from .trading_pair import TradingPair
 from .order import Order
+from .utils import to_decimal, D0
 
 
 class Corp(Trader):
@@ -54,8 +57,8 @@ class Corp(Trader):
     def __init__(
         self,
         name: str,
-        total_shares: float,
-        initial_price: float,
+        total_shares,
+        initial_price,
         quote_token: Token,
         token_id: int,
     ):
@@ -78,8 +81,8 @@ class Corp(Trader):
         """
         super().__init__(name)
 
-        self.total_shares = total_shares
-        self.initial_price = initial_price
+        self.total_shares = to_decimal(total_shares)
+        self.initial_price = to_decimal(initial_price)
         self._quote_token = quote_token
 
         # 创建股份代币
@@ -147,7 +150,7 @@ class Corp(Trader):
         """
         return self.trading_pair, self.share_token
 
-    def get_remaining_shares(self) -> float:
+    def get_remaining_shares(self) -> Decimal:
         """
         获取剩余未售出的股份数量
 
@@ -156,9 +159,9 @@ class Corp(Trader):
         """
         if self.ipo_order:
             return self.ipo_order.remaining_volume
-        return 0.0
+        return D0
 
-    def get_raised_funds(self) -> float:
+    def get_raised_funds(self) -> Decimal:
         """
         获取已募集的资金总额
 
@@ -168,9 +171,9 @@ class Corp(Trader):
         if self.ipo_order:
             sold_shares = self.ipo_order.executed
             return sold_shares * self.initial_price
-        return 0.0
+        return D0
 
-    def get_share_holders(self, all_traders: List[Trader]) -> Dict[Trader, float]:
+    def get_share_holders(self, all_traders: List[Trader]) -> Dict[Trader, Decimal]:
         """
         获取所有股份持有人及其持股数量（不包括公司自己）
 
@@ -180,16 +183,16 @@ class Corp(Trader):
         Returns:
             {Trader: 持股数量} 的字典
         """
-        holders: Dict[Trader, float] = {}
+        holders: Dict[Trader, Decimal] = {}
         for trader in all_traders:
             # 排除公司自己
             if trader is not self:
-                shares = trader.assets.get(self.share_token, 0.0)
-                if shares > 0:
+                shares = trader.assets.get(self.share_token, D0)
+                if shares > D0:
                     holders[trader] = shares
         return holders
 
-    def get_circulating_shares(self, all_traders: List[Trader]) -> float:
+    def get_circulating_shares(self, all_traders: List[Trader]) -> Decimal:
         """
         获取流通中的股份总数（已售出的股份，不包括公司自己持有的）
 
@@ -199,19 +202,19 @@ class Corp(Trader):
         Returns:
             流通股份总数
         """
-        total = 0.0
+        total = D0
         for trader in all_traders:
             # 排除公司自己
             if trader is not self:
-                total += trader.assets.get(self.share_token, 0.0)
+                total += trader.assets.get(self.share_token, D0)
         return total
 
     def distribute_dividend(
         self,
         dividend_token: Token,
-        total_amount: float,
+        total_amount,
         all_traders: List[Trader]
-    ) -> Dict[Trader, float]:
+    ) -> Dict[Trader, Decimal]:
         """
         分红 - 按持股比例分配代币给所有股东
 
@@ -239,8 +242,10 @@ class Corp(Trader):
             >>> for trader, amount in dividend_record.items():
             ...     print(f"{trader.name} 获得分红: {amount} USDT")
         """
+        total_amount = to_decimal(total_amount)
+
         # 检查公司是否有足够的资产进行分红
-        company_balance = self.assets.get(dividend_token, 0.0)
+        company_balance = self.assets.get(dividend_token, D0)
         if company_balance < total_amount:
             raise ValueError(
                 f"公司 {self.name} 资产不足: "
@@ -250,7 +255,7 @@ class Corp(Trader):
 
         # 获取流通中的股份总数
         circulating_shares = self.get_circulating_shares(all_traders)
-        if circulating_shares <= 0:
+        if circulating_shares <= D0:
             # 没有流通股份，不进行分红
             return {}
 
@@ -261,14 +266,14 @@ class Corp(Trader):
         holders = self.get_share_holders(all_traders)
 
         # 按持股比例分配分红
-        dividend_record: Dict[Trader, float] = {}
+        dividend_record: Dict[Trader, Decimal] = {}
         for holder, shares in holders.items():
             # 计算持股比例
             ratio = shares / circulating_shares
             # 计算分红金额
             dividend = total_amount * ratio
             # 发放分红
-            holder.assets[dividend_token] = holder.assets.get(dividend_token, 0.0) + dividend
+            holder.assets[dividend_token] = holder.assets.get(dividend_token, D0) + dividend
             # 记录
             dividend_record[holder] = dividend
 
@@ -276,9 +281,9 @@ class Corp(Trader):
 
     def get_dividend_per_share(
         self,
-        total_amount: float,
+        total_amount,
         all_traders: List[Trader]
-    ) -> float:
+    ) -> Decimal:
         """
         计算每股分红金额
 
@@ -289,12 +294,13 @@ class Corp(Trader):
         Returns:
             每股分红金额（如果无流通股份则返回 0）
         """
+        total_amount = to_decimal(total_amount)
         circulating_shares = self.get_circulating_shares(all_traders)
-        if circulating_shares <= 0:
-            return 0.0
+        if circulating_shares <= D0:
+            return D0
         return total_amount / circulating_shares
 
-    def issue_shares(self, amount: float, issue_price: Optional[float] = None) -> float:
+    def issue_shares(self, amount, issue_price = None) -> Decimal:
         """
         增发股份 - 公司向自己发行新的股份
 
@@ -320,34 +326,37 @@ class Corp(Trader):
             >>> # 增发并更新发行价格
             >>> company.issue_shares(500000.0, issue_price=15.0)
         """
-        if amount <= 0:
+        amount = to_decimal(amount)
+        if amount <= D0:
             raise ValueError(f"增发数量必须为正数，收到: {amount}")
 
         # 更新总股本
         self.total_shares += amount
 
         # 将新股份添加给公司自己
-        current_shares = self.assets.get(self.share_token, 0.0)
+        current_shares = self.assets.get(self.share_token, D0)
         self.assets[self.share_token] = current_shares + amount
 
         # 如果提供了增发价格，更新交易对的当前价格参考
-        if issue_price is not None and issue_price > 0:
-            self.trading_pair.price = issue_price
-            # 同时更新初始价格（作为最新参考）
-            self.initial_price = issue_price
+        if issue_price is not None:
+            issue_price = to_decimal(issue_price)
+            if issue_price > D0:
+                self.trading_pair.price = issue_price
+                # 同时更新初始价格（作为最新参考）
+                self.initial_price = issue_price
 
         return self.total_shares
 
-    def get_company_owned_shares(self) -> float:
+    def get_company_owned_shares(self) -> Decimal:
         """
         获取公司自己持有的股份数量（库藏股）
 
         Returns:
             公司持有的股份数量
         """
-        return self.assets.get(self.share_token, 0.0)
+        return self.assets.get(self.share_token, D0)
 
-    def get_market_cap(self, current_price: Optional[float] = None) -> float:
+    def get_market_cap(self, current_price = None) -> Decimal:
         """
         计算市值
 
@@ -357,5 +366,8 @@ class Corp(Trader):
         Returns:
             总市值（总股本 × 股价）
         """
-        price = current_price if current_price is not None else self.trading_pair.price
-        return self.total_shares * price
+        if current_price is not None:
+            current_price = to_decimal(current_price)
+        else:
+            current_price = self.trading_pair.price
+        return self.total_shares * current_price

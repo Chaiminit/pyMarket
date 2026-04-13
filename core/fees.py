@@ -16,6 +16,9 @@ Fees 模块 - 手续费系统
 from typing import Dict, Optional, TYPE_CHECKING
 from dataclasses import dataclass
 from enum import Enum
+from decimal import Decimal
+
+from .utils import to_decimal, D0
 
 if TYPE_CHECKING:
     from .trader import Trader
@@ -64,22 +67,29 @@ class FeeConfig:
         ...     fee_recipient=platform_trader
         ... )
     """
-    maker_rate: float = 0.0
-    taker_rate: float = 0.0
+    maker_rate: Decimal = D0
+    taker_rate: Decimal = D0
     fee_type: FeeType = FeeType.PERCENTAGE
     direction: FeeDirection = FeeDirection.BOTH
-    min_fee: float = 0.0
-    max_fee: Optional[float] = None
+    min_fee: Decimal = D0
+    max_fee: Optional[Decimal] = None
     fee_recipient: Optional["Trader"] = None
 
     def __post_init__(self):
         """验证费率合法性"""
-        if self.maker_rate < 0 or self.taker_rate < 0:
+        self.maker_rate = to_decimal(self.maker_rate)
+        self.taker_rate = to_decimal(self.taker_rate)
+        self.min_fee = to_decimal(self.min_fee)
+        if self.max_fee is not None:
+            self.max_fee = to_decimal(self.max_fee)
+
+        if self.maker_rate < D0 or self.taker_rate < D0:
             raise ValueError("费率不能为负数")
         if self.fee_type == FeeType.PERCENTAGE:
-            if self.maker_rate > 1.0 or self.taker_rate > 1.0:
-                raise ValueError("百分比费率不能超过 100%")
-        if self.min_fee < 0:
+            if self.maker_rate > D0 or self.taker_rate > D0:
+                if self.maker_rate > Decimal('1.0') or self.taker_rate > Decimal('1.0'):
+                    raise ValueError("百分比费率不能超过 100%")
+        if self.min_fee < D0:
             raise ValueError("最小手续费不能为负数")
         if self.max_fee is not None and self.max_fee < self.min_fee:
             raise ValueError("最大手续费不能小于最小手续费")
@@ -97,11 +107,11 @@ class FeeResult:
         buyer_received: 买方实际收到的资产（扣除手续费后）
         seller_received: 卖方实际收到的资产（扣除手续费后）
     """
-    buyer_fee: float = 0.0
-    seller_fee: float = 0.0
-    total_fee: float = 0.0
-    buyer_received: float = 0.0
-    seller_received: float = 0.0
+    buyer_fee: Decimal = D0
+    seller_fee: Decimal = D0
+    total_fee: Decimal = D0
+    buyer_received: Decimal = D0
+    seller_received: Decimal = D0
 
 
 class FeeCalculator:
@@ -133,10 +143,10 @@ class FeeCalculator:
 
     def calculate(
         self,
-        trade_amount: float,
+        trade_amount,
         is_taker: bool = True,
         is_buyer: bool = True
-    ) -> float:
+    ) -> Decimal:
         """
         计算单边手续费
 
@@ -148,13 +158,15 @@ class FeeCalculator:
         Returns:
             应支付的手续费金额
         """
+        trade_amount = to_decimal(trade_amount)
+
         # 根据收取方向判断是否需要支付手续费
         direction = self.config.direction
 
         if direction == FeeDirection.BUYER and not is_buyer:
-            return 0.0
+            return D0
         if direction == FeeDirection.SELLER and is_buyer:
-            return 0.0
+            return D0
 
         # 选择费率
         rate = self.config.taker_rate if is_taker else self.config.maker_rate
@@ -175,7 +187,7 @@ class FeeCalculator:
 
     def calculate_trade_fees(
         self,
-        trade_amount: float,
+        trade_amount,
         buyer_is_taker: bool = False,
         seller_is_taker: bool = False
     ) -> FeeResult:
@@ -197,8 +209,8 @@ class FeeCalculator:
             buyer_fee=buyer_fee,
             seller_fee=seller_fee,
             total_fee=buyer_fee + seller_fee,
-            buyer_received=0.0,  # 需要外部计算
-            seller_received=0.0
+            buyer_received=D0,  # 需要外部计算
+            seller_received=D0
         )
 
 
@@ -231,10 +243,10 @@ class FeeCollector:
             fee_recipient: 手续费接收者，None 表示手续费不支付给任何人
         """
         self.fee_recipient = fee_recipient
-        self.collected_fees: Dict["Token", float] = {}
+        self.collected_fees: Dict["Token", Decimal] = {}
         self.fee_history: list = []
 
-    def collect(self, token: "Token", amount: float, trade_info: dict = None) -> None:
+    def collect(self, token: "Token", amount, trade_info: dict = None) -> None:
         """
         收集手续费并支付给接收者
 
@@ -243,15 +255,16 @@ class FeeCollector:
             amount: 手续费金额
             trade_info: 可选的交易信息记录
         """
-        if amount <= 0:
+        amount = to_decimal(amount)
+        if amount <= D0:
             return
 
         # 记录手续费（使用 Token 对象作为键）
-        self.collected_fees[token] = self.collected_fees.get(token, 0.0) + amount
+        self.collected_fees[token] = self.collected_fees.get(token, D0) + amount
 
         # 如果有接收者，将手续费支付给接收者
         if self.fee_recipient is not None:
-            self.fee_recipient.assets[token] = self.fee_recipient.assets.get(token, 0.0) + amount
+            self.fee_recipient.assets[token] = self.fee_recipient.assets.get(token, D0) + amount
 
         if trade_info:
             trade_info["fee_amount"] = amount
@@ -259,7 +272,7 @@ class FeeCollector:
             trade_info["fee_recipient"] = self.fee_recipient.name if self.fee_recipient else None
             self.fee_history.append(trade_info)
 
-    def get_collected(self, token: Optional["Token"] = None) -> float | Dict["Token", float]:
+    def get_collected(self, token: Optional["Token"] = None):
         """
         获取已收集的手续费
 
@@ -270,7 +283,7 @@ class FeeCollector:
             指定代币的手续费金额，或所有代币的手续费字典
         """
         if token:
-            return self.collected_fees.get(token, 0.0)
+            return self.collected_fees.get(token, D0)
         return self.collected_fees.copy()
 
     def reset(self, token: Optional["Token"] = None) -> None:

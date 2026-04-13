@@ -12,6 +12,7 @@
 - **股份公司系统**：支持IPO发行、股份代币创建、一级市场交易、增发股份和分红
 - **治理投票系统**：支持加权投票、多选项治理提案、参与率检查
 - **手续费系统**：支持Maker/Taker费率、自定义手续费接收者
+- **高精度计算**：使用 Decimal 28位精度，避免浮点数精度问题
 - **并发安全**：撮合引擎采用线程锁保护，支持多线程并发交易
 - **实时GUI界面**：使用PyQt5构建的实时K线图和交易界面
 - **玩家模式**：支持人类玩家参与市场交易
@@ -419,6 +420,31 @@ class Token:
     def __init__(self, name: str, token_id: int, is_quote: bool = False)
 ```
 
+### Decimal 工具函数
+
+所有金额、价格、数量计算均使用 `Decimal` 28位精度。
+
+```python
+from core import to_decimal, d, D0, D1
+
+# 转换任意数值为 Decimal
+value = to_decimal(100.5)           # Decimal('100.5')
+value = to_decimal("123.456789")    # Decimal('123.456789')
+
+# 快捷函数
+value = d(100)                      # Decimal('100')
+
+# 常用常量
+zero = D0                           # Decimal('0')
+one = D1                            # Decimal('1')
+```
+
+**高精度计算说明：**
+- 所有价格、数量、金额字段均使用 `Decimal` 类型
+- 默认 28 位精度，避免浮点数精度问题
+- 支持任意精度的金融计算
+- 使用 `to_decimal()` 或 `d()` 函数进行类型转换
+
 ### TradingPair
 
 普通交易对类，支持线程安全的订单撮合。
@@ -488,6 +514,11 @@ class LiquidationEngine:
 - **投票修改**：在投票结束前可以修改投票选择
 - **自动过期**：支持设置投票截止时间，到期自动关闭
 - **回调机制**：投票时自动调用投票者的 `on_vote_cast()`，达到最低参与率时调用创建者的 `on_proposal_reached_quorum()` 并自动关闭提案
+
+**高精度计算说明：**
+- 所有价格、数量、金额字段均使用 `Decimal` 类型，28位精度
+- 避免浮点数精度问题，确保金融计算准确性
+- API 中的 `float` 参数会自动转换为 `Decimal`
 
 **并发安全说明：**
 - 撮合引擎（`TradingPair` 和 `BondTradingPair`）已内置线程锁保护

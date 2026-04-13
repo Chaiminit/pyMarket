@@ -10,8 +10,10 @@ Order 模块 - 订单定义
 
 from typing import Optional, Callable, TYPE_CHECKING
 from datetime import datetime
+from decimal import Decimal
 
 from .token import Token
+from .utils import to_decimal, D0
 
 if TYPE_CHECKING:
     from .trader import Trader
@@ -41,7 +43,7 @@ class Order:
     Examples:
         >>> order = Order(trader, "buy", 50000.0, 1.0, 50000.0, pair)
         >>> order.remaining_volume  # 未成交数量
-        1.0
+        Decimal('1.0')
         >>> order.close()  # 取消订单，返还冻结资金
     """
 
@@ -49,9 +51,9 @@ class Order:
         self,
         trader: "Trader",
         direction: str,
-        price: float,
-        volume: float,
-        frozen_amount: float,
+        price,
+        volume,
+        frozen_amount,
         pair: "TradingPair",
     ):
         """
@@ -67,10 +69,10 @@ class Order:
         """
         self.trader = trader
         self.direction = direction
-        self.price = price
-        self.volume = volume
-        self.executed = 0.0
-        self.remaining_frozen = frozen_amount
+        self.price = to_decimal(price)
+        self.volume = to_decimal(volume)
+        self.executed = D0
+        self.remaining_frozen = to_decimal(frozen_amount)
         self.time = datetime.now()
         self.pair = pair
         self.cancelled = False
@@ -112,29 +114,29 @@ class Order:
             self.trader.orders.remove(self)
 
         # 返还冻结资金
-        if self.remaining_frozen > 0:
+        if self.remaining_frozen > D0:
             if self.direction == "buy":
                 # 买单返还计价代币
                 quote_token = self.pair.quote_token
                 self.trader.assets[quote_token] = (
-                    self.trader.assets.get(quote_token, 0.0) + self.remaining_frozen
+                    self.trader.assets.get(quote_token, D0) + self.remaining_frozen
                 )
             else:
                 # 卖单返还基础代币
                 base_token = self.pair.base_token
                 self.trader.assets[base_token] = (
-                    self.trader.assets.get(base_token, 0.0) + self.remaining_frozen
+                    self.trader.assets.get(base_token, D0) + self.remaining_frozen
                 )
-            self.remaining_frozen = 0
+            self.remaining_frozen = D0
 
     @property
-    def remaining_volume(self) -> float:
+    def remaining_volume(self) -> Decimal:
         """获取剩余未成交数量"""
         return self.volume - self.executed
 
     def __repr__(self) -> str:
         return (
-            f"Order({self.direction}, {self.price:.4f}, vol={self.volume:.4f})"
+            f"Order({self.direction}, {self.price}, vol={self.volume})"
         )
 
 
@@ -163,9 +165,9 @@ class BondOrder:
         self,
         trader: "Trader",
         direction: str,
-        interest_rate: float,
-        volume: float,
-        frozen_amount: float,
+        interest_rate,
+        volume,
+        frozen_amount,
         bond_pair: "BondTradingPair",
     ):
         """
@@ -181,10 +183,10 @@ class BondOrder:
         """
         self.trader = trader
         self.direction = direction
-        self.interest_rate = interest_rate
-        self.volume = volume
-        self.executed = 0.0
-        self.remaining_frozen = frozen_amount
+        self.interest_rate = to_decimal(interest_rate)
+        self.volume = to_decimal(volume)
+        self.executed = D0
+        self.remaining_frozen = to_decimal(frozen_amount)
         self.time = datetime.now()
         self.bond_pair = bond_pair
         self.cancelled = False
@@ -219,23 +221,23 @@ class BondOrder:
         # 返还冻结资金/债券
         if self.direction == "buy":
             # 买单：返还剩余的冻结代币
-            if self.remaining_frozen > 0:
+            if self.remaining_frozen > D0:
                 token = self.bond_pair.token
                 self.trader.assets[token] = (
-                    self.trader.assets.get(token, 0.0) + self.remaining_frozen
+                    self.trader.assets.get(token, D0) + self.remaining_frozen
                 )
-                self.remaining_frozen = 0
+                self.remaining_frozen = D0
         else:
             # 卖单：返还剩余的冻结债券
             bond_token = self.bond_pair.token
             remaining_bonds = self.volume - self.executed
-            if remaining_bonds > 0:
-                self.trader.bonds[bond_token] = self.trader.bonds.get(bond_token, 0.0) + remaining_bonds
+            if remaining_bonds > D0:
+                self.trader.bonds[bond_token] = self.trader.bonds.get(bond_token, D0) + remaining_bonds
 
     @property
-    def remaining_volume(self) -> float:
+    def remaining_volume(self) -> Decimal:
         """获取剩余未成交数量"""
         return self.volume - self.executed
 
     def __repr__(self) -> str:
-        return f"BondOrder({self.direction}, rate={self.interest_rate:.4f}, vol={self.volume:.4f})"
+        return f"BondOrder({self.direction}, rate={self.interest_rate}, vol={self.volume})"
