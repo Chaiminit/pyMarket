@@ -20,6 +20,7 @@ from enum import Enum
 from decimal import Decimal
 
 from .utils import to_decimal, D0
+from .engine_node import EngineNode
 
 
 class VoteStatus(Enum):
@@ -47,7 +48,7 @@ class VoteRecord:
     timestamp: datetime = field(default_factory=datetime.now)
 
 
-class GovernanceProposal:
+class GovernanceProposal(EngineNode):
     """
     治理提案
 
@@ -113,6 +114,7 @@ class GovernanceProposal:
             min_participation_rate: 最低参与率要求（0-1）
             proposal_id: 自定义提案ID（可选）
         """
+        super().__init__(f"{title[:20]}...")
         # 生成唯一ID
         if proposal_id:
             self.id = proposal_id
@@ -351,7 +353,7 @@ class GovernanceProposal:
         return f"GovernanceProposal({self.id}: {self.title})"
 
 
-class GovernanceSystem:
+class GovernanceSystem(EngineNode):
     """
     治理系统
 
@@ -375,6 +377,7 @@ class GovernanceSystem:
 
     def __init__(self):
         """初始化治理系统"""
+        super().__init__("GovernanceSystem")
         self.proposals: Dict[str, GovernanceProposal] = {}
 
     def create_proposal(

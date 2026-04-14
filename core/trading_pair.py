@@ -26,9 +26,10 @@ from .order import Order
 from .token import Token
 from .fees import FeeConfig, FeeCalculator, FeeCollector
 from .utils import to_decimal, D0, D1
+from .engine_node import EngineNode
 
 
-class TradingPair:
+class TradingPair(EngineNode):
     """
     普通交易对 - 管理订单簿和撮合逻辑
 
@@ -70,6 +71,7 @@ class TradingPair:
             initial_price: 初始价格
             fee_config: 手续费配置，默认零手续费
         """
+        super().__init__(f"{base_token.name}/{quote_token.name}")
         self.base_token = base_token
         self.quote_token = quote_token
         self.price = to_decimal(initial_price)

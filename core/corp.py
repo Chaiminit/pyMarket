@@ -24,9 +24,10 @@ from .token import Token
 from .trading_pair import TradingPair
 from .order import Order
 from .utils import to_decimal, D0
+from .engine_node import EngineNode
 
 
-class Corp(Trader):
+class Corp(Trader, EngineNode):
     """
     股份公司类 - 代表发行股票的公司
 

@@ -29,12 +29,13 @@ from .order import BondOrder
 from .token import Token
 from .fees import FeeConfig, FeeCalculator, FeeCollector
 from .utils import to_decimal, D0, D1
+from .engine_node import EngineNode
 
 if TYPE_CHECKING:
     pass
 
 
-class BondTradingPair:
+class BondTradingPair(EngineNode):
     """
     债券交易对 - 管理债券订单簿和利息结算
 
@@ -63,7 +64,8 @@ class BondTradingPair:
         >>> insolvent = bond_pair.settle_interest_simple(traders, dt=0.1)
     """
 
-    def __init__(self, token: Token, initial_rate, fee_config: Optional[FeeConfig] = None):
+    def __init__(self, token: Token, initial_rate, fee_config: Optional[FeeConfig] = None
+    ):
         """
         创建债券交易对
 
@@ -72,6 +74,7 @@ class BondTradingPair:
             initial_rate: 初始市场利率（年化）
             fee_config: 手续费配置，默认零手续费
         """
+        super().__init__(token.name)
         self.token = token
         self.current_rate = to_decimal(initial_rate)
         self.log: List[Tuple[float, Decimal, Decimal, Decimal, Decimal]] = []

@@ -26,6 +26,7 @@ from .liquidation import LiquidationEngine, LiquidationResult
 from .fees import FeeConfig
 from .corp import Corp
 from .utils import to_decimal, D0
+from .engine_node import EngineNode
 
 
 class MarketEngine:
@@ -100,6 +101,7 @@ class MarketEngine:
         self._step_counter = 0
         self._last_step_time: Optional[float] = None  # 上次调用 step 的时间戳
         self._liquidation_engine = LiquidationEngine(self)
+        self._nodes: Set[EngineNode] = set()  # 所有引擎节点（自动注册）
 
         # 全局默认手续费配置（默认为零手续费）
         self._default_trading_fee_config: FeeConfig = FeeConfig()
@@ -126,6 +128,8 @@ class MarketEngine:
         token = self._token_class(name, token_id, is_quote, **kwargs)
         self.tokens[token] = name
         self._token_by_name[name] = token
+        self._nodes.add(token)
+        token._engine = self
 
         if is_quote:
             if self._quote_token is not None:
@@ -155,6 +159,8 @@ class MarketEngine:
 
         self.tokens[token] = token.name
         self._token_by_name[token.name] = token
+        self._nodes.add(token)
+        token._engine = self
 
         if token.is_quote:
             if self._quote_token is not None:
@@ -231,6 +237,8 @@ class MarketEngine:
         config = fee_config if fee_config is not None else self._default_trading_fee_config
         pair = self._trading_pair_class(base_token, quote_token, initial_price, config, **kwargs)
         self.trading_pairs.append(pair)
+        self._nodes.add(pair)
+        pair._engine = self
         return pair
 
     def register_trading_pair(self, pair: TradingPair) -> None:
@@ -248,6 +256,8 @@ class MarketEngine:
         if not isinstance(pair, TradingPair):
             raise TypeError(f"pair 必须是 TradingPair 或其子类的实例，收到 {type(pair)}")
         self.trading_pairs.append(pair)
+        self._nodes.add(pair)
+        pair._engine = self
 
     # ====== 债券交易对 ======
 
@@ -281,6 +291,8 @@ class MarketEngine:
         config = fee_config if fee_config is not None else self._default_bond_fee_config
         bond_pair = self._bond_trading_pair_class(token, initial_rate, config, **kwargs)
         self.bond_trading_pairs.append(bond_pair)
+        self._nodes.add(bond_pair)
+        bond_pair._engine = self
         return bond_pair
 
     def register_bond_trading_pair(self, bond_pair: BondTradingPair) -> None:
@@ -298,6 +310,8 @@ class MarketEngine:
         if not isinstance(bond_pair, BondTradingPair):
             raise TypeError(f"bond_pair 必须是 BondTradingPair 或其子类的实例，收到 {type(bond_pair)}")
         self.bond_trading_pairs.append(bond_pair)
+        self._nodes.add(bond_pair)
+        bond_pair._engine = self
 
     def add_bond_client(self, bond_pair: BondTradingPair, trader: Trader) -> None:
         """
@@ -324,6 +338,8 @@ class MarketEngine:
         """
         trader = self._trader_class(name, **kwargs)
         self.traders.append(trader)
+        self._nodes.add(trader)
+        trader._engine = self
 
         # 设置价格转换器
         if self._quote_token:
@@ -347,6 +363,8 @@ class MarketEngine:
             raise TypeError(f"trader 必须是 Trader 或其子类的实例，收到 {type(trader)}")
 
         self.traders.append(trader)
+        self._nodes.add(trader)
+        trader._engine = self
 
         # 设置价格转换器
         if self._quote_token:
@@ -383,6 +401,8 @@ class MarketEngine:
             **kwargs
         )
         self.traders.append(corp)
+        self._nodes.add(corp)
+        corp._engine = self
 
         # 注册股份代币到引擎
         share_token_name = f"{name}_SHARE"
@@ -411,6 +431,8 @@ class MarketEngine:
             raise TypeError(f"corp 必须是 Corp 或其子类的实例，收到 {type(corp)}")
 
         self.traders.append(corp)
+        self._nodes.add(corp)
+        corp._engine = self
 
         # 注册股份代币到引擎
         share_token_name = f"{corp.name}_SHARE"
@@ -482,9 +504,7 @@ class MarketEngine:
 
         当前执行的操作：
         - 计算时间步长（秒）
-        - 调用所有交易对的 step 回调
-        - 调用所有债券交易对的 step 回调
-        - 调用所有交易者的 step 回调
+        - 调用所有引擎节点的 step 回调（包括交易对、债券对、交易者等）
         - 结算所有债券交易对的利息
         - 处理破产清算
         """
@@ -500,27 +520,12 @@ class MarketEngine:
             dt = Decimal(str(current_time - self._last_step_time))
         self._last_step_time = current_time
 
-        # 调用所有交易对的 step 回调（使用秒为单位）
-        for pair in self.trading_pairs:
+        # 调用所有引擎节点的 step 回调（使用秒为单位）
+        for node in EngineNode.get_all_nodes():
             try:
-                pair.step(dt)
+                node.step(dt)
             except Exception as e:
-                print(f"警告: 交易对 {pair.base_token.name}/{pair.quote_token.name} 的 step 回调失败: {e}")
-
-        # 调用所有债券交易对的 step 回调（使用秒为单位）
-        for bond_pair in self.bond_trading_pairs:
-            try:
-                bond_pair.step(dt)
-            except Exception as e:
-                print(f"警告: 债券交易对 {bond_pair.token.name} 的 step 回调失败: {e}")
-
-        # 调用所有交易者的 step 回调（使用秒为单位）
-        for trader in self.traders:
-            try:
-                trader.step(dt)
-            except Exception as e:
-                # 单个交易者的回调失败不应影响其他交易者
-                print(f"警告: 交易者 {trader.name} 的 step 回调失败: {e}")
+                print(f"警告: 引擎节点 {node.name} 的 step 回调失败: {e}")
 
         # 结算债券利息（使用秒为单位）
         if self.traders and self.bond_trading_pairs:

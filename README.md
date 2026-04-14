@@ -7,6 +7,7 @@
 
 ## 功能特性
 
+- **引擎节点系统**：所有核心对象继承自 EngineNode 基类，自动注册到引擎，统一的 step 接口
 - **市场模拟引擎**：完整的市场模拟系统，支持多种交易对和债券
 - **债券交易系统**：支持债券发行、交易和利息结算
 - **股份公司系统**：支持IPO发行、股份代币创建、一级市场交易、增发股份和分红
@@ -48,10 +49,10 @@ pip install -e ".[dev]"
 ### 基础示例
 
 ```python
-from core import get_engine, Token, Trader
+from core import MarketEngine, Token
 
-# 获取市场引擎（单例）
-engine = get_engine()
+# 创建市场引擎
+engine = MarketEngine()
 
 # 创建代币
 usdt = engine.create_token("USDT", is_quote=True)
@@ -65,7 +66,16 @@ trader = engine.create_trader("Alice")
 engine.allocate_assets(trader, btc, 10.0)
 
 print(f"Alice 总资产: {trader.get_total_assets(usdt)}")
+
+# 执行市场模拟步进
+engine.step()
 ```
+
+**引擎节点系统说明：**
+- 所有核心对象（Token、Trader、TradingPair、BondTradingPair、Corp）都继承自 `EngineNode` 基类
+- 对象创建时自动注册到引擎的节点列表
+- `engine.step()` 会自动调用所有节点的 `step(dt)` 方法
+- 子类可重写 `step(dt)` 方法实现自定义的每步逻辑
 
 ### 债券交易示例
 
@@ -293,6 +303,12 @@ class MarketEngine:
     def step(self) -> None
 ```
 
+**引擎节点系统：**
+- 所有核心对象（Token、Trader、TradingPair、BondTradingPair、Corp）都继承自 `EngineNode` 基类
+- 对象创建时自动注册到引擎的节点列表
+- `engine.step()` 会自动调用所有节点的 `step(dt)` 方法
+- 子类可重写 `step(dt)` 方法实现自定义的每步逻辑
+
 **自定义类型支持：**
 - 通过构造函数传入自定义类（必须继承自基础类）
 - 通过 `register_*` 方法注册外部创建的实例
@@ -303,7 +319,7 @@ class MarketEngine:
 交易者类，代表市场参与者。
 
 ```python
-class Trader:
+class Trader(EngineNode):
     def __init__(self, name: str)
     def add_asset(self, token: Token, amount: float)
     def get_total_assets(self, quote_token: Optional[Token] = None) -> float
@@ -327,6 +343,11 @@ class Trader:
     def step(self, dt: Decimal) -> None
 ```
 
+**引擎节点继承：**
+- 继承自 `EngineNode` 基类，自动注册到引擎节点列表
+- `step(dt)` 方法由引擎自动调用，`dt` 为时间步长（秒）
+- 可重写 `step(dt)` 实现自定义的每步逻辑（如策略更新、状态检查等）
+
 **治理回调说明：**
 - `on_vote_cast()`：当该交易者参与投票时被调用，可重写以实现自定义逻辑
 - `on_proposal_reached_quorum()`：当该交易者创建的提案达到最低参与率时被调用，调用后提案自动关闭
@@ -340,7 +361,7 @@ class Trader:
 股份公司类，继承自 Trader，用于IPO发行、增发股份和分红。
 
 ```python
-class Corp(Trader):
+class Corp(Trader, EngineNode):
     def __init__(self, name: str, total_shares: float, 
                  initial_price: float, quote_token: Token, token_id: int)
     
@@ -363,12 +384,17 @@ class Corp(Trader):
     def get_circulating_shares(self, all_traders: List[Trader]) -> float
 ```
 
+**引擎节点继承：**
+- 继承自 `EngineNode` 基类（通过 Trader），自动注册到引擎节点列表
+- `step(dt)` 方法由引擎自动调用，`dt` 为时间步长（秒）
+- 可重写 `step(dt)` 实现自定义的每步逻辑（如公司状态更新、市场行为等）
+
 ### GovernanceProposal
 
 治理提案类，用于创建和管理投票。
 
 ```python
-class GovernanceProposal:
+class GovernanceProposal(EngineNode):
     def __init__(
         self,
         title: str,
@@ -390,18 +416,23 @@ class GovernanceProposal:
     def get_voter_choice(self, voter: Trader) -> Optional[str]
     def has_voted(self, voter: Trader) -> bool
     def get_pending_voters(self) -> List[Trader]
-    
+```
+
+**引擎节点继承：**
+- 继承自 `EngineNode` 基类，自动注册到引擎节点列表
+- `step(dt)` 方法由引擎自动调用，`dt` 为时间步长（秒）
+- 可重写 `step(dt)` 实现自定义的每步逻辑（如投票状态更新、过期检查等）
+
     # 状态管理
     def close_voting(self) -> None
     def execute(self) -> None
-```
 
 ### GovernanceSystem
 
 治理系统类，管理多个治理提案。
 
 ```python
-class GovernanceSystem:
+class GovernanceSystem(EngineNode):
     def __init__(self)
     
     # 创建提案
@@ -414,7 +445,12 @@ class GovernanceSystem:
     def get_active_proposals(self) -> List[GovernanceProposal]
     def get_proposals_by_status(self, status: VoteStatus) -> List[GovernanceProposal]
     def get_proposals_by_participant(self, participant: Trader) -> List[GovernanceProposal]
-    
+```
+
+**引擎节点继承：**
+- 继承自 `EngineNode` 基类，自动注册到引擎节点列表
+- `step(dt)` 方法由引擎自动调用，`dt` 为时间步长（秒）
+- 可重写 `step(dt)` 实现自定义的每步逻辑（如提案管理、过期检查等）
     # 管理
     def close_expired_proposals(self) -> List[GovernanceProposal]
 ```
@@ -476,7 +512,7 @@ one = D1                            # Decimal('1')
 普通交易对类，支持线程安全的订单撮合。
 
 ```python
-class TradingPair:
+class TradingPair(EngineNode):
     def submit_limit_order(self, trader: Trader, direction: str,
                           price: float, volume: float, frozen_amount: float)
     def execute_market_order(self, trader: Trader, direction: str,
@@ -486,6 +522,11 @@ class TradingPair:
     def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]
     def step(self, dt: Decimal) -> None
 ```
+
+**引擎节点继承：**
+- 继承自 `EngineNode` 基类，自动注册到引擎节点列表
+- `step(dt)` 方法由引擎自动调用，`dt` 为时间步长（秒）
+- 可重写 `step(dt)` 实现自定义的每步逻辑（如价格更新、订单检查等）
 
 **并发安全说明：**
 - `submit_limit_order()` 和 `execute_market_order()` 方法使用线程锁保护
@@ -501,7 +542,7 @@ class TradingPair:
 债券交易对类，支持线程安全的债券交易。
 
 ```python
-class BondTradingPair:
+class BondTradingPair(EngineNode):
     def submit_limit_order(self, trader: Trader, direction: str,
                           interest_rate: float, volume: float, frozen_amount: float)
     def settle_interest_simple(self, traders: Set[Trader], dt_seconds: float) -> List[Tuple[Trader, float]]
@@ -510,6 +551,11 @@ class BondTradingPair:
     def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]
     def step(self, dt: Decimal) -> None
 ```
+
+**引擎节点继承：**
+- 继承自 `EngineNode` 基类，自动注册到引擎节点列表
+- `step(dt)` 方法由引擎自动调用，`dt` 为时间步长（秒）
+- 可重写 `step(dt)` 实现自定义的每步逻辑（如利率更新、订单检查等）
 
 **并发安全说明：**
 - `submit_limit_order()` 方法使用线程锁保护
@@ -561,6 +607,12 @@ class LiquidationEngine:
 - 所有 `step(dt)` 回调的 `dt` 参数单位为秒
 - `settle_interest_simple()` 的 `dt_seconds` 参数单位为秒
 
+**引擎节点系统：**
+- 所有核心对象（Token、Trader、TradingPair、BondTradingPair、Corp、GovernanceProposal、GovernanceSystem）都继承自 `EngineNode` 基类
+- 对象创建时自动注册到引擎的节点列表
+- `engine.step()` 会自动调用所有节点的 `step(dt)` 方法
+- 子类可重写 `step(dt)` 方法实现自定义的每步逻辑
+
 **高精度计算说明：**
 - 所有价格、数量、金额字段均使用 `Decimal` 类型，28位精度
 - 避免浮点数精度问题，确保金融计算准确性
@@ -587,6 +639,7 @@ pyMarket/
 │   ├── fees.py            # 手续费系统
 │   ├── order.py           # 订单系统
 │   ├── token.py           # 代币定义
+│   ├── engine_node.py     # 引擎节点基类
 │   └── utils.py           # 工具函数
 ├── gui/                    # GUI模块
 │   ├── __init__.py

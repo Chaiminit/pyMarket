@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from .token import Token
 from .utils import to_decimal, D0, D1
+from .engine_node import EngineNode
 
 if TYPE_CHECKING:
     from .trading_pair import TradingPair
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from .governance import GovernanceProposal
 
 
-class Trader:
+class Trader(EngineNode):
     """
     交易者类 - 金融市场参与者
 
@@ -57,6 +58,7 @@ class Trader:
         Args:
             name: 交易者名称
         """
+        super().__init__(name)
         self.name = name
         self.assets: Dict[Token, Decimal] = {}
         self.bonds: Dict[Token, Decimal] = {}

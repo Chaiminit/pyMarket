@@ -6,9 +6,10 @@ Token 模块 - 代币定义
 """
 
 from typing import Optional
+from .engine_node import EngineNode
 
 
-class Token:
+class Token(EngineNode):
     """
     代币类 - 代表金融市场中的可交易资产
 
@@ -29,7 +30,8 @@ class Token:
         True
     """
 
-    def __init__(self, name: str, token_id: int, is_quote: bool = False):
+    def __init__(self, name: str, token_id: int, is_quote: bool = False
+    ):
         """
         创建代币实例
 
@@ -41,6 +43,8 @@ class Token:
         self.name = name
         self.token_id = token_id
         self.is_quote = is_quote
+        self._engine = None
+        super().__init__(name)
 
     def __hash__(self) -> int:
         """基于token_id的哈希，支持作为字典键"""
