@@ -240,15 +240,25 @@ class Trader(EngineNode):
             if available < total_required:
                 return False
 
-            self.assets[pair.quote_token] = available - total_required
-            pair.submit_limit_order(self, direction, price, volume, total_required)
+            try:
+                self.assets[pair.quote_token] = available - total_required
+                pair.submit_limit_order(self, direction, price, volume, total_required)
+            except ValueError:
+                # 返还资金，恢复状态
+                self.assets[pair.quote_token] = available
+                raise
         else:  # sell
             # 卖单冻结资产，手续费从成交所得中扣除
             available = self.assets.get(pair.base_token, D0)
             if available < volume:
                 return False
-            self.assets[pair.base_token] = available - volume
-            pair.submit_limit_order(self, direction, price, volume, volume)
+            try:
+                self.assets[pair.base_token] = available - volume
+                pair.submit_limit_order(self, direction, price, volume, volume)
+            except ValueError:
+                # 返还资金，恢复状态
+                self.assets[pair.base_token] = available
+                raise
 
         return True
 

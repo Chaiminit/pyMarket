@@ -140,6 +140,25 @@ class TradingPair(EngineNode):
             frozen_amount: 冻结资金（买单）或资产（卖单）
         """
         with self._lock:
+            # 真正冻结资金/资产
+            frozen_amount = to_decimal(frozen_amount)
+            if direction == "buy":
+                # 买单：冻结计价代币(USDT)
+                if trader.assets.get(self.quote_token, D0) < frozen_amount:
+                    raise ValueError(
+                        f"余额不足：需要 {frozen_amount} {self.quote_token.name}，"
+                        f"可用 {trader.assets.get(self.quote_token, D0)}"
+                    )
+                trader.assets[self.quote_token] = trader.assets.get(self.quote_token, D0) - frozen_amount
+            else:
+                # 卖单：冻结基础代币
+                if trader.assets.get(self.base_token, D0) < frozen_amount:
+                    raise ValueError(
+                        f"余额不足：需要 {frozen_amount} {self.base_token.name}，"
+                        f"可用 {trader.assets.get(self.base_token, D0)}"
+                    )
+                trader.assets[self.base_token] = trader.assets.get(self.base_token, D0) - frozen_amount
+
             order = Order(trader, direction, price, volume, frozen_amount, self)
 
             if direction == "buy":
@@ -405,29 +424,32 @@ class TradingPair(EngineNode):
                     total_buyer_cost = match_amount + buyer_fee
                     seller_revenue = match_amount - seller_fee
 
-            # 计算多冻结的手续费（冻结时按Taker，实际按Maker）
-            taker_fee_estimate = match_amount * self.fee_config.taker_rate
-            maker_fee_actual = buyer_fee
-            excess_frozen = taker_fee_estimate - maker_fee_actual
+            # 计算多冻结的资金（实际成交价格 vs 冻结时价格）
+            # 买家冻结时按limit_price，实际按match_price
+            frozen_price = best_buy.price
+            actual_cost = match_amount + buyer_fee
+            excess_frozen = (frozen_price * match_volume) - actual_cost
 
             # 执行交易
-            # 从冻结资金中扣除成本，剩余部分（包括多余冻结的手续费）会返还
+            # 1. 买家收到商品（基础代币）
             buyer.assets[self.base_token] = (
                 buyer.assets.get(self.base_token, D0) + match_volume
             )
 
+            # 2. 卖家减少商品，收到USDT
             seller.assets[self.base_token] = seller_base - match_volume
             seller.assets[self.quote_token] = (
                 seller.assets.get(self.quote_token, D0) + seller_revenue
             )
 
-            best_buy.remaining_frozen -= total_buyer_cost
+            # 3. 更新冻结资金计数（扣除实际成交成本）
+            best_buy.remaining_frozen -= actual_cost
             best_sell.remaining_frozen -= match_volume
 
             best_buy.executed += match_volume
             best_sell.executed += match_volume
 
-            # 返还多冻结的手续费到买家资产
+            # 4. 返还买家多冻结的资金（按实际成交价格计算）
             if excess_frozen > D0:
                 buyer.assets[self.quote_token] = buyer.assets.get(self.quote_token, D0) + excess_frozen
 
