@@ -248,6 +248,60 @@ alice.submit_market_order(pair, "buy", 1.0)
 print(f"平台手续费收入: {platform.assets.get(usdt, 0)} USDT")
 ```
 
+### 特殊手续费规则（匿名函数）
+
+```python
+from core import get_engine, FeeConfig
+from decimal import Decimal
+
+engine = get_engine()
+usdt = engine.create_token("USDT", is_quote=True)
+btc = engine.create_token("BTC")
+
+# 创建特殊手续费规则（如 VIP 折扣）
+def special_fee_rule(trader, is_buyer, is_taker):
+    """
+    根据交易者属性定制手续费
+    
+    Args:
+        trader: 交易者对象
+        is_buyer: 是否为买方
+        is_taker: 是否为吃单
+    
+    Returns:
+        费率修饰系数（如 0.5 表示 5 折）
+    """
+    if trader.name.startswith("VIP"):
+        return Decimal("0.5")  # VIP 交易者享受 5 折
+    return Decimal("1.0")    # 普通交易者无折扣
+
+# 创建带特殊手续费规则的配置
+fee_config = FeeConfig(
+    maker_rate=0.001,
+    taker_rate=0.002,
+    fee_modifier=special_fee_rule  # 传入匿名函数
+)
+
+# 创建交易对
+pair = engine.create_trading_pair("BTC", "USDT", 50000.0, fee_config=fee_config)
+
+# VIP 交易者享受折扣
+vip_trader = engine.create_trader("VIP_Alice")
+engine.allocate_assets(vip_trader, usdt, 100000.0)
+vip_trader.submit_market_order(pair, "buy", 1.0)  # 手续费为 50 USDT (原价 100)
+
+# 普通交易者无折扣
+normal_trader = engine.create_trader("Normal_Bob")
+engine.allocate_assets(normal_trader, usdt, 100000.0)
+normal_trader.submit_market_order(pair, "buy", 1.0)  # 手续费为 100 USDT
+```
+
+**费率修饰器说明：**
+- `fee_modifier` 参数接收一个函数，签名：`func(trader, is_buyer, is_taker) -> Decimal`
+- 函数返回费率修饰系数（如 0.5 表示 5 折，1.0 表示无折扣）
+- 可根据交易者属性（如名称、持仓、历史等）定制不同规则
+- 返回 `None` 表示不应用任何修饰
+
 ### 按金额下单示例
 
 ```python

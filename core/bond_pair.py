@@ -296,8 +296,8 @@ class BondTradingPair(EngineNode):
             seller = best_sell.trader
 
             # 计算手续费（债券撮合，双方都是 Maker）
-            buyer_fee = self.fee_calculator.calculate(match_volume, is_taker=False, is_buyer=True)
-            seller_fee = self.fee_calculator.calculate(match_volume, is_taker=False, is_buyer=False)
+            buyer_fee = self.fee_calculator.calculate(match_volume, is_taker=False, is_buyer=True, trader=buyer)
+            seller_fee = self.fee_calculator.calculate(match_volume, is_taker=False, is_buyer=False, trader=seller)
 
             total_buyer_cost = match_volume + buyer_fee
 

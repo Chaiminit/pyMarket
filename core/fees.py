@@ -6,6 +6,7 @@ Fees 模块 - 手续费系统
 - 支持按交易金额或固定金额收取
 - 支持多种收取方向（买入方、卖出方、双方）
 - 支持将手续费支付给指定的 Trader
+- 支持通过匿名函数针对不同交易者设置特殊手续费
 
 手续费收取方向：
 - "buyer": 仅向买方收取
@@ -13,7 +14,7 @@ Fees 模块 - 手续费系统
 - "both": 向买卖双方收取
 """
 
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, Optional, TYPE_CHECKING, Callable, Union
 from dataclasses import dataclass
 from enum import Enum
 from decimal import Decimal
@@ -43,7 +44,7 @@ class FeeConfig:
     手续费配置类
 
     支持为 Maker（挂单）和 Taker（吃单）设置不同费率，
-    支持按百分比或固定金额收取。
+    支持按百分比或固定金额收取，也支持通过匿名函数针对不同交易者设置特殊手续费。
 
     Attributes:
         maker_rate: Maker 费率（如 0.001 表示 0.1%）
@@ -53,6 +54,7 @@ class FeeConfig:
         min_fee: 最小手续费金额（防止小额交易手续费为0）
         max_fee: 最大手续费金额（可选，用于限制高额手续费）
         fee_recipient: 手续费接收者（Trader），None 表示不收取手续费
+        fee_modifier: 费率修饰器（匿名函数），接收 (trader, is_buyer, is_taker) 返回修改后的费率
 
     Examples:
         >>> # 标准交易所费率：Maker 0.1%, Taker 0.2%
@@ -66,6 +68,17 @@ class FeeConfig:
         ...     direction=FeeDirection.SELLER,
         ...     fee_recipient=platform_trader
         ... )
+        >>>
+        >>> # 使用匿名函数为 VIP 交易者提供折扣
+        >>> def vip_discount(trader, is_buyer, is_taker):
+        ...     if trader.name.startswith("VIP"):
+        ...         return Decimal('0.5')  # VIP 交易者享受 5 折
+        ...     return Decimal('1.0')    # 普通交易者无折扣
+        >>> config = FeeConfig(
+        ...     maker_rate=0.001,
+        ...     taker_rate=0.002,
+        ...     fee_modifier=vip_discount
+        ... )
     """
     maker_rate: Decimal = D0
     taker_rate: Decimal = D0
@@ -74,6 +87,7 @@ class FeeConfig:
     min_fee: Decimal = D0
     max_fee: Optional[Decimal] = None
     fee_recipient: Optional["Trader"] = None
+    fee_modifier: Optional[Callable[["Trader", bool, bool], Decimal]] = None
 
     def __post_init__(self):
         """验证费率合法性"""
@@ -145,7 +159,8 @@ class FeeCalculator:
         self,
         trade_amount,
         is_taker: bool = True,
-        is_buyer: bool = True
+        is_buyer: bool = True,
+        trader: Optional["Trader"] = None
     ) -> Decimal:
         """
         计算单边手续费
@@ -154,6 +169,7 @@ class FeeCalculator:
             trade_amount: 交易金额
             is_taker: 是否为吃单（Taker），False 表示挂单（Maker）
             is_buyer: 是否为买方（用于判断是否需要支付手续费）
+            trader: 交易者对象，用于应用特殊手续费规则
 
         Returns:
             应支付的手续费金额
@@ -170,6 +186,12 @@ class FeeCalculator:
 
         # 选择费率
         rate = self.config.taker_rate if is_taker else self.config.maker_rate
+
+        # 应用费率修饰器（匿名函数）
+        if self.config.fee_modifier is not None and trader is not None:
+            modifier = self.config.fee_modifier(trader, is_buyer, is_taker)
+            if modifier is not None:
+                rate = rate * modifier
 
         # 计算手续费
         if self.config.fee_type == FeeType.PERCENTAGE:

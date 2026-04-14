@@ -192,7 +192,7 @@ class TradingPair(EngineNode):
                     match_cost = match_volume * match_price
 
                     # 检查买家余额（需要支付金额 + 手续费）
-                    buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True)
+                    buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True, trader=trader)
                     total_required = match_cost + buyer_fee
 
                     available = trader.assets.get(self.quote_token, D0)
@@ -205,7 +205,7 @@ class TradingPair(EngineNode):
                             if max_buy_volume > D0:
                                 match_volume = min(match_volume, max_buy_volume)
                                 match_cost = match_volume * match_price
-                                buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True)
+                                buyer_fee = self.fee_calculator.calculate(match_cost, is_taker=True, is_buyer=True, trader=trader)
                                 total_required = match_cost + buyer_fee
                             else:
                                 break
@@ -213,7 +213,7 @@ class TradingPair(EngineNode):
                             break
 
                     # 计算卖方手续费
-                    seller_fee = self.fee_calculator.calculate(match_cost, is_taker=False, is_buyer=False)
+                    seller_fee = self.fee_calculator.calculate(match_cost, is_taker=False, is_buyer=False, trader=sell_order.trader)
                     seller_revenue = match_cost - seller_fee
 
                     # 执行交易
@@ -287,8 +287,8 @@ class TradingPair(EngineNode):
                             break
 
                     # 计算手续费
-                    seller_fee = self.fee_calculator.calculate(match_revenue, is_taker=True, is_buyer=False)
-                    buyer_fee = self.fee_calculator.calculate(match_revenue, is_taker=False, is_buyer=True)
+                    seller_fee = self.fee_calculator.calculate(match_revenue, is_taker=True, is_buyer=False, trader=trader)
+                    buyer_fee = self.fee_calculator.calculate(match_revenue, is_taker=False, is_buyer=True, trader=buy_order.trader)
 
                     seller_net_revenue = match_revenue - seller_fee
                     buyer_cost = match_revenue + buyer_fee
@@ -376,8 +376,8 @@ class TradingPair(EngineNode):
             seller = best_sell.trader
 
             # 计算手续费（限价单撮合，双方都是 Maker）
-            buyer_fee = self.fee_calculator.calculate(match_amount, is_taker=False, is_buyer=True)
-            seller_fee = self.fee_calculator.calculate(match_amount, is_taker=False, is_buyer=False)
+            buyer_fee = self.fee_calculator.calculate(match_amount, is_taker=False, is_buyer=True, trader=buyer)
+            seller_fee = self.fee_calculator.calculate(match_amount, is_taker=False, is_buyer=False, trader=seller)
 
             total_buyer_cost = match_amount + buyer_fee
             seller_revenue = match_amount - seller_fee
@@ -400,8 +400,8 @@ class TradingPair(EngineNode):
                     # 部分成交
                     match_volume = seller_base
                     match_amount = match_volume * match_price
-                    buyer_fee = self.fee_calculator.calculate(match_amount, is_taker=False, is_buyer=True)
-                    seller_fee = self.fee_calculator.calculate(match_amount, is_taker=False, is_buyer=False)
+                    buyer_fee = self.fee_calculator.calculate(match_amount, is_taker=False, is_buyer=True, trader=buyer)
+                    seller_fee = self.fee_calculator.calculate(match_amount, is_taker=False, is_buyer=False, trader=seller)
                     total_buyer_cost = match_amount + buyer_fee
                     seller_revenue = match_amount - seller_fee
 
