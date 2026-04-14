@@ -135,7 +135,7 @@ class BondTradingPair:
         return total
 
     def settle_interest_simple(
-        self, traders: Set[Trader], dt
+        self, traders: Set[Trader], dt_seconds
     ) -> List[Tuple[Trader, Decimal]]:
         """
         简单高频利息结算
@@ -143,21 +143,21 @@ class BondTradingPair:
         结算逻辑：
         1. 识别所有债权人（正债券）和债务人（负债券）
         2. 计算有效债券基数 = min(总债权, 总债务)
-        3. 总利息 = 有效债券 × 利率 × 时间
+        3. 总利息 = 有效债券 × 利率 × 时间(秒) / 一年的秒数
         4. 从债务人按比例收取利息
         5. 将收到的利息按比例支付给债权人
 
         Args:
             traders: 所有交易者集合
-            dt: 时间步长（年化单位，如0.1表示约36.5天）
+            dt_seconds: 时间步长（秒）
 
         Returns:
             无法足额支付利息的债务人列表 [(trader, 缺口金额), ...]
         """
-        dt = to_decimal(dt)
+        dt_seconds = to_decimal(dt_seconds)
         insolvent_debtors: List[Tuple[Trader, Decimal]] = []
 
-        if self.current_rate == D0 or dt <= D0:
+        if self.current_rate == D0 or dt_seconds <= D0:
             return insolvent_debtors
 
         creditors: List[Tuple[Trader, Decimal]] = []  # (交易者, 有效债权)
@@ -185,9 +185,11 @@ class BondTradingPair:
         if total_positive <= D0 or total_negative <= D0:
             return insolvent_debtors
 
-        # 计算总利息（基于有效债券基数）
+        # 计算总利息（基于有效债券基数，时间单位为秒）
+        # 年化利率需要转换为秒利率：rate_per_second = current_rate / 31536000
         effective_bonds = min(total_positive, total_negative)
-        total_interest = effective_bonds * self.current_rate * dt
+        seconds_per_year = Decimal('31536000')  # 365天 = 31536000秒
+        total_interest = effective_bonds * self.current_rate * dt_seconds / seconds_per_year
 
         if total_interest <= D0:
             return insolvent_debtors
@@ -373,3 +375,21 @@ class BondTradingPair:
         buys = [(order.interest_rate, order.remaining_volume) for order in self.buy_orders[:depth]]
         sells = [(order.interest_rate, order.remaining_volume) for order in self.sell_orders[:depth]]
         return buys, sells
+
+    def step(self, dt: Decimal) -> None:
+        """
+        市场模拟步进回调
+
+        每个模拟步进时由 Engine 调用，子类可以重写此方法
+        来实现自定义的每步逻辑（如利率更新、订单检查等）。
+
+        Args:
+            dt: 时间步长（秒）
+
+        Examples:
+            >>> class MyBondTradingPair(BondTradingPair):
+            ...     def step(self, dt):
+            ...         # 每步更新市场利率
+            ...         self.update_interest_rate()
+        """
+        pass

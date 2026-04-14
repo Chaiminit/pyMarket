@@ -15,7 +15,7 @@ Engine 模块 - 市场引擎
 import time
 import math
 import random
-from typing import List, Dict, Tuple, Optional, Set
+from typing import List, Dict, Tuple, Optional, Set, Type
 from decimal import Decimal
 
 from .trading_pair import TradingPair
@@ -35,6 +35,9 @@ class MarketEngine:
     管理代币、交易对、债券对、交易者的生命周期，
     提供统一的交易接口和市场模拟功能。
 
+    支持自定义类型：可以通过设置 token_class、trading_pair_class 等
+    来使用继承自基础类的自定义实现。
+
     Attributes:
         tokens: 代币映射 {name: Token}
         trading_pairs: 普通交易对列表
@@ -52,8 +55,42 @@ class MarketEngine:
         >>> engine.allocate_assets(trader, "BTC", 10.0)
     """
 
-    def __init__(self):
-        """初始化市场引擎"""
+    def __init__(
+        self,
+        token_class: Type[Token] = Token,
+        trading_pair_class: Type[TradingPair] = TradingPair,
+        bond_trading_pair_class: Type[BondTradingPair] = BondTradingPair,
+        trader_class: Type[Trader] = Trader,
+        corp_class: Type[Corp] = Corp,
+    ):
+        """
+        初始化市场引擎
+
+        Args:
+            token_class: 代币类，必须继承自 Token
+            trading_pair_class: 交易对类，必须继承自 TradingPair
+            bond_trading_pair_class: 债券交易对类，必须继承自 BondTradingPair
+            trader_class: 交易者类，必须继承自 Trader
+            corp_class: 股份公司类，必须继承自 Corp
+        """
+        # 验证类型
+        if not issubclass(token_class, Token):
+            raise TypeError(f"token_class 必须继承自 Token，收到 {token_class}")
+        if not issubclass(trading_pair_class, TradingPair):
+            raise TypeError(f"trading_pair_class 必须继承自 TradingPair，收到 {trading_pair_class}")
+        if not issubclass(bond_trading_pair_class, BondTradingPair):
+            raise TypeError(f"bond_trading_pair_class 必须继承自 BondTradingPair，收到 {bond_trading_pair_class}")
+        if not issubclass(trader_class, Trader):
+            raise TypeError(f"trader_class 必须继承自 Trader，收到 {trader_class}")
+        if not issubclass(corp_class, Corp):
+            raise TypeError(f"corp_class 必须继承自 Corp，收到 {corp_class}")
+
+        self._token_class = token_class
+        self._trading_pair_class = trading_pair_class
+        self._bond_trading_pair_class = bond_trading_pair_class
+        self._trader_class = trader_class
+        self._corp_class = corp_class
+
         self.tokens: Dict[Token, str] = {}  # Token -> name 的映射
         self._token_by_name: Dict[str, Token] = {}  # name -> Token 的映射（用于快速查找）
         self.trading_pairs: List[TradingPair] = []
@@ -70,13 +107,14 @@ class MarketEngine:
 
     # ====== 代币管理 ======
 
-    def create_token(self, name: str, is_quote: bool = False) -> Token:
+    def create_token(self, name: str, is_quote: bool = False, **kwargs) -> Token:
         """
         创建新代币
 
         Args:
             name: 代币名称
             is_quote: 是否为计价代币（全局只能有一个）
+            **kwargs: 传递给 token_class 的额外参数
 
         Returns:
             创建的Token实例
@@ -85,7 +123,7 @@ class MarketEngine:
             ValueError: 如果计价代币已存在
         """
         token_id = len(self.tokens)
-        token = Token(name, token_id, is_quote)
+        token = self._token_class(name, token_id, is_quote, **kwargs)
         self.tokens[token] = name
         self._token_by_name[name] = token
 
@@ -95,6 +133,33 @@ class MarketEngine:
             self._quote_token = token
 
         return token
+
+    def register_token(self, token: Token) -> None:
+        """
+        注册外部创建的代币
+
+        允许从外部传入自定义 Token 实例（必须继承自 Token）
+
+        Args:
+            token: Token 实例
+
+        Raises:
+            TypeError: 如果 token 不是 Token 或其子类
+            ValueError: 如果代币名称已存在
+        """
+        if not isinstance(token, Token):
+            raise TypeError(f"token 必须是 Token 或其子类的实例，收到 {type(token)}")
+
+        if token.name in self._token_by_name:
+            raise ValueError(f"代币 {token.name} 已存在")
+
+        self.tokens[token] = token.name
+        self._token_by_name[token.name] = token
+
+        if token.is_quote:
+            if self._quote_token is not None:
+                raise ValueError(f"全局计价代币已存在: {self._quote_token}")
+            self._quote_token = token
 
     def get_token(self, name: str) -> Optional[Token]:
         """
@@ -130,7 +195,14 @@ class MarketEngine:
 
     # ====== 普通交易对 ======
 
-    def create_trading_pair(self, base_token_name: str, quote_token_name: str, initial_price, fee_config: Optional[FeeConfig] = None) -> TradingPair:
+    def create_trading_pair(
+        self,
+        base_token_name: str,
+        quote_token_name: str,
+        initial_price,
+        fee_config: Optional[FeeConfig] = None,
+        **kwargs
+    ) -> TradingPair:
         """
         创建普通交易对
 
@@ -139,6 +211,7 @@ class MarketEngine:
             quote_token_name: 计价代币名称
             initial_price: 初始价格
             fee_config: 手续费配置，None 则使用全局默认配置
+            **kwargs: 传递给 trading_pair_class 的额外参数
 
         Returns:
             创建的TradingPair实例
@@ -156,13 +229,35 @@ class MarketEngine:
 
         # 使用传入的配置或全局默认配置
         config = fee_config if fee_config is not None else self._default_trading_fee_config
-        pair = TradingPair(base_token, quote_token, initial_price, config)
+        pair = self._trading_pair_class(base_token, quote_token, initial_price, config, **kwargs)
         self.trading_pairs.append(pair)
         return pair
 
+    def register_trading_pair(self, pair: TradingPair) -> None:
+        """
+        注册外部创建的交易对
+
+        允许从外部传入自定义 TradingPair 实例（必须继承自 TradingPair）
+
+        Args:
+            pair: TradingPair 实例
+
+        Raises:
+            TypeError: 如果 pair 不是 TradingPair 或其子类
+        """
+        if not isinstance(pair, TradingPair):
+            raise TypeError(f"pair 必须是 TradingPair 或其子类的实例，收到 {type(pair)}")
+        self.trading_pairs.append(pair)
+
     # ====== 债券交易对 ======
 
-    def create_bond_trading_pair(self, token_name: str, initial_rate, fee_config: Optional[FeeConfig] = None) -> BondTradingPair:
+    def create_bond_trading_pair(
+        self,
+        token_name: str,
+        initial_rate,
+        fee_config: Optional[FeeConfig] = None,
+        **kwargs
+    ) -> BondTradingPair:
         """
         创建债券交易对
 
@@ -170,6 +265,7 @@ class MarketEngine:
             token_name: 标的代币名称
             initial_rate: 初始利率（年化）
             fee_config: 手续费配置，None 则使用全局默认配置
+            **kwargs: 传递给 bond_trading_pair_class 的额外参数
 
         Returns:
             创建的BondTradingPair实例
@@ -183,9 +279,25 @@ class MarketEngine:
 
         # 使用传入的配置或全局默认配置
         config = fee_config if fee_config is not None else self._default_bond_fee_config
-        bond_pair = BondTradingPair(token, initial_rate, config)
+        bond_pair = self._bond_trading_pair_class(token, initial_rate, config, **kwargs)
         self.bond_trading_pairs.append(bond_pair)
         return bond_pair
+
+    def register_bond_trading_pair(self, bond_pair: BondTradingPair) -> None:
+        """
+        注册外部创建的债券交易对
+
+        允许从外部传入自定义 BondTradingPair 实例（必须继承自 BondTradingPair）
+
+        Args:
+            bond_pair: BondTradingPair 实例
+
+        Raises:
+            TypeError: 如果 bond_pair 不是 BondTradingPair 或其子类
+        """
+        if not isinstance(bond_pair, BondTradingPair):
+            raise TypeError(f"bond_pair 必须是 BondTradingPair 或其子类的实例，收到 {type(bond_pair)}")
+        self.bond_trading_pairs.append(bond_pair)
 
     def add_bond_client(self, bond_pair: BondTradingPair, trader: Trader) -> None:
         """
@@ -199,17 +311,18 @@ class MarketEngine:
 
     # ====== 交易者管理 ======
 
-    def create_trader(self, name: str) -> Trader:
+    def create_trader(self, name: str, **kwargs) -> Trader:
         """
         创建交易者
 
         Args:
             name: 交易者名称
+            **kwargs: 传递给 trader_class 的额外参数
 
         Returns:
             创建的Trader实例
         """
-        trader = Trader(name)
+        trader = self._trader_class(name, **kwargs)
         self.traders.append(trader)
 
         # 设置价格转换器
@@ -218,12 +331,34 @@ class MarketEngine:
 
         return trader
 
+    def register_trader(self, trader: Trader) -> None:
+        """
+        注册外部创建的交易者
+
+        允许从外部传入自定义 Trader 实例（必须继承自 Trader）
+
+        Args:
+            trader: Trader 实例
+
+        Raises:
+            TypeError: 如果 trader 不是 Trader 或其子类
+        """
+        if not isinstance(trader, Trader):
+            raise TypeError(f"trader 必须是 Trader 或其子类的实例，收到 {type(trader)}")
+
+        self.traders.append(trader)
+
+        # 设置价格转换器
+        if self._quote_token:
+            trader.set_price_converter(self._convert_price, self._quote_token)
+
     def create_corp(
         self,
         name: str,
         total_shares,
         initial_price,
-        quote_token: Token
+        quote_token: Token,
+        **kwargs
     ) -> Corp:
         """
         创建股份公司
@@ -233,17 +368,19 @@ class MarketEngine:
             total_shares: 初始发行的总股份数
             initial_price: 初始发行价格
             quote_token: 计价代币
+            **kwargs: 传递给 corp_class 的额外参数
 
         Returns:
             创建的Corp实例
         """
         token_id = len(self.tokens)
-        corp = Corp(
+        corp = self._corp_class(
             name=name,
             total_shares=total_shares,
             initial_price=initial_price,
             quote_token=quote_token,
-            token_id=token_id
+            token_id=token_id,
+            **kwargs
         )
         self.traders.append(corp)
 
@@ -257,6 +394,32 @@ class MarketEngine:
             corp.set_price_converter(self._convert_price, self._quote_token)
 
         return corp
+
+    def register_corp(self, corp: Corp) -> None:
+        """
+        注册外部创建的股份公司
+
+        允许从外部传入自定义 Corp 实例（必须继承自 Corp）
+
+        Args:
+            corp: Corp 实例
+
+        Raises:
+            TypeError: 如果 corp 不是 Corp 或其子类
+        """
+        if not isinstance(corp, Corp):
+            raise TypeError(f"corp 必须是 Corp 或其子类的实例，收到 {type(corp)}")
+
+        self.traders.append(corp)
+
+        # 注册股份代币到引擎
+        share_token_name = f"{corp.name}_SHARE"
+        self.tokens[corp.share_token] = share_token_name
+        self._token_by_name[share_token_name] = corp.share_token
+
+        # 设置价格转换器
+        if self._quote_token:
+            corp.set_price_converter(self._convert_price, self._quote_token)
 
     def allocate_assets(self, trader: Trader, token: Token, amount) -> None:
         """
@@ -318,23 +481,48 @@ class MarketEngine:
         执行一步市场模拟
 
         当前执行的操作：
-        - 结算所有债券交易对的利息（基于距离上次调用的时间）
+        - 计算时间步长（秒）
+        - 调用所有交易对的 step 回调
+        - 调用所有债券交易对的 step 回调
+        - 调用所有交易者的 step 回调
+        - 结算所有债券交易对的利息
         - 处理破产清算
         """
         self._step_counter += 1
 
-        # 计算距离上次调用的时间（年化单位）
+        # 计算距离上次调用的时间（秒）
         current_time = time.time()
         if self._last_step_time is None:
             # 首次调用，不结算利息（dt=0）
             dt = D0
         else:
-            # 计算实际经过的时间（秒）并转换为年化
-            elapsed_seconds = current_time - self._last_step_time
-            dt = Decimal(str(elapsed_seconds)) / Decimal('31536000')  # 365天 = 31536000秒
+            # 计算实际经过的时间（秒）
+            dt = Decimal(str(current_time - self._last_step_time))
         self._last_step_time = current_time
 
-        # 结算债券利息
+        # 调用所有交易对的 step 回调（使用秒为单位）
+        for pair in self.trading_pairs:
+            try:
+                pair.step(dt)
+            except Exception as e:
+                print(f"警告: 交易对 {pair.base_token.name}/{pair.quote_token.name} 的 step 回调失败: {e}")
+
+        # 调用所有债券交易对的 step 回调（使用秒为单位）
+        for bond_pair in self.bond_trading_pairs:
+            try:
+                bond_pair.step(dt)
+            except Exception as e:
+                print(f"警告: 债券交易对 {bond_pair.token.name} 的 step 回调失败: {e}")
+
+        # 调用所有交易者的 step 回调（使用秒为单位）
+        for trader in self.traders:
+            try:
+                trader.step(dt)
+            except Exception as e:
+                # 单个交易者的回调失败不应影响其他交易者
+                print(f"警告: 交易者 {trader.name} 的 step 回调失败: {e}")
+
+        # 结算债券利息（使用秒为单位）
         if self.traders and self.bond_trading_pairs:
             traders_set = set(self.traders)
 

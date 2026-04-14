@@ -426,3 +426,21 @@ class Trader:
             ...             print(f"提案通过: {result['winner']}")
         """
         pass
+
+    def step(self, dt: Decimal) -> None:
+        """
+        市场模拟步进回调
+
+        每个模拟步进时由 Engine 调用，子类可以重写此方法
+        来实现自定义的每步逻辑（如策略更新、状态检查等）。
+
+        Args:
+            dt: 时间步长（秒）
+
+        Examples:
+            >>> class MyTrader(Trader):
+            ...     def step(self, dt):
+            ...         # 每步执行策略
+            ...         self.update_strategy()
+        """
+        pass

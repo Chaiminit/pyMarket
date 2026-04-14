@@ -500,3 +500,21 @@ class TradingPair:
             "buy_value": buy_value,
             "sell_value": sell_value,
         }
+
+    def step(self, dt: Decimal) -> None:
+        """
+        市场模拟步进回调
+
+        每个模拟步进时由 Engine 调用，子类可以重写此方法
+        来实现自定义的每步逻辑（如价格更新、订单检查等）。
+
+        Args:
+            dt: 时间步长（秒）
+
+        Examples:
+            >>> class MyTradingPair(TradingPair):
+            ...     def step(self, dt):
+            ...         # 每步更新价格
+            ...         self.update_price()
+        """
+        pass

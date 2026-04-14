@@ -256,20 +256,34 @@ alice.submit_market_order_by_quote(pair, "buy", 50000.0)  # 花费 50000 USDT
 
 ```python
 class MarketEngine:
+    def __init__(
+        self,
+        token_class: Type[Token] = Token,
+        trading_pair_class: Type[TradingPair] = TradingPair,
+        bond_trading_pair_class: Type[BondTradingPair] = BondTradingPair,
+        trader_class: Type[Trader] = Trader,
+        corp_class: Type[Corp] = Corp,
+    )
+    
     # 代币管理
-    def create_token(self, name: str, is_quote: bool = False) -> Token
+    def create_token(self, name: str, is_quote: bool = False, **kwargs) -> Token
+    def register_token(self, token: Token) -> None
     def get_token(self, name: str) -> Optional[Token]
     
     # 交易对管理
-    def create_trading_pair(self, base_name: str, quote_name: str, 
-                           initial_price: float, fee_config: Optional[FeeConfig] = None) -> TradingPair
-    def create_bond_trading_pair(self, token_name: str, 
-                                  initial_rate: float, fee_config: Optional[FeeConfig] = None) -> BondTradingPair
+    def create_trading_pair(self, base_name: str, quote_name: str,
+                           initial_price: float, fee_config: Optional[FeeConfig] = None, **kwargs) -> TradingPair
+    def register_trading_pair(self, pair: TradingPair) -> None
+    def create_bond_trading_pair(self, token_name: str,
+                                  initial_rate: float, fee_config: Optional[FeeConfig] = None, **kwargs) -> BondTradingPair
+    def register_bond_trading_pair(self, bond_pair: BondTradingPair) -> None
     
     # 交易者管理
-    def create_trader(self, name: str) -> Trader
-    def create_corp(self, name: str, total_shares: float, 
-                    initial_price: float, quote_token: Token) -> Corp
+    def create_trader(self, name: str, **kwargs) -> Trader
+    def register_trader(self, trader: Trader) -> None
+    def create_corp(self, name: str, total_shares: float,
+                    initial_price: float, quote_token: Token, **kwargs) -> Corp
+    def register_corp(self, corp: Corp) -> None
     def allocate_assets(self, trader: Trader, token: Token, amount: float)
     
     # 手续费统计
@@ -278,6 +292,11 @@ class MarketEngine:
     # 市场模拟
     def step(self) -> None
 ```
+
+**自定义类型支持：**
+- 通过构造函数传入自定义类（必须继承自基础类）
+- 通过 `register_*` 方法注册外部创建的实例
+- 支持 `**kwargs` 传递额外参数给自定义类
 
 ### Trader
 
@@ -303,11 +322,18 @@ class Trader:
     # 治理回调
     def on_vote_cast(self, proposal: GovernanceProposal, option: str, weight: float) -> None
     def on_proposal_reached_quorum(self, proposal: GovernanceProposal, result: Dict[str, Any]) -> None
+    
+    # 步进回调
+    def step(self, dt: Decimal) -> None
 ```
 
 **治理回调说明：**
 - `on_vote_cast()`：当该交易者参与投票时被调用，可重写以实现自定义逻辑
 - `on_proposal_reached_quorum()`：当该交易者创建的提案达到最低参与率时被调用，调用后提案自动关闭
+
+**步进回调说明：**
+- `step(dt)`：每个模拟步进时由 Engine 调用，`dt` 为时间步长（秒）
+- 子类可重写此方法实现自定义的每步逻辑（如策略更新、状态检查等）
 
 ### Corp
 
@@ -458,12 +484,17 @@ class TradingPair:
     def set_fee_config(self, fee_config: FeeConfig) -> None
     def get_fee_config(self) -> FeeConfig
     def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]
+    def step(self, dt: Decimal) -> None
 ```
 
 **并发安全说明：**
 - `submit_limit_order()` 和 `execute_market_order()` 方法使用线程锁保护
 - 支持多线程并发提交订单，无需外部同步
 - 订单簿操作具有原子性保证
+
+**步进回调说明：**
+- `step(dt)`：每个模拟步进时由 Engine 调用，`dt` 为时间步长（秒）
+- 子类可重写此方法实现自定义的每步逻辑（如价格更新、订单检查等）
 
 ### BondTradingPair
 
@@ -473,16 +504,25 @@ class TradingPair:
 class BondTradingPair:
     def submit_limit_order(self, trader: Trader, direction: str,
                           interest_rate: float, volume: float, frozen_amount: float)
-    def settle_interest_simple(self, traders: Set[Trader], dt: float) -> List[Tuple[Trader, float]]
+    def settle_interest_simple(self, traders: Set[Trader], dt_seconds: float) -> List[Tuple[Trader, float]]
     def set_fee_config(self, fee_config: FeeConfig) -> None
     def get_fee_config(self) -> FeeConfig
     def get_collected_fees(self, token: Optional[Token] = None) -> float | Dict[Token, float]
+    def step(self, dt: Decimal) -> None
 ```
 
 **并发安全说明：**
 - `submit_limit_order()` 方法使用线程锁保护
 - 支持多线程并发提交债券订单
 - 债券订单簿操作具有原子性保证
+
+**步进回调说明：**
+- `step(dt)`：每个模拟步进时由 Engine 调用，`dt` 为时间步长（秒）
+- 子类可重写此方法实现自定义的每步逻辑（如利率更新、订单检查等）
+
+**利息结算说明：**
+- `settle_interest_simple(traders, dt_seconds)`：结算债券利息
+- `dt_seconds` 为时间步长（秒），内部会自动转换为年化利率计算
 
 ### LiquidationEngine
 
@@ -514,6 +554,12 @@ class LiquidationEngine:
 - **投票修改**：在投票结束前可以修改投票选择
 - **自动过期**：支持设置投票截止时间，到期自动关闭
 - **回调机制**：投票时自动调用投票者的 `on_vote_cast()`，达到最低参与率时调用创建者的 `on_proposal_reached_quorum()` 并自动关闭提案
+
+**时间单位说明：**
+- 所有时间参数统一使用**秒**作为单位
+- `Engine.step()` 计算的时间步长为秒
+- 所有 `step(dt)` 回调的 `dt` 参数单位为秒
+- `settle_interest_simple()` 的 `dt_seconds` 参数单位为秒
 
 **高精度计算说明：**
 - 所有价格、数量、金额字段均使用 `Decimal` 类型，28位精度
