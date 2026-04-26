@@ -99,6 +99,11 @@ class TradingPair(EngineNode):
         self.amm_reserve_base += base_amount
         self.amm_reserve_quote += quote_amount
         self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
+        
+        # 更新市场价格为 AMM 隐含价格
+        if self.amm_reserve_base > D0:
+            self.price = self.get_amm_price()
+            self.update_consensus_price()
 
     def withdraw_amm_liquidity(self, base_amount) -> Tuple[Decimal, Decimal]:
         """
@@ -125,6 +130,11 @@ class TradingPair(EngineNode):
         self.amm_reserve_base -= base_amount
         self.amm_reserve_quote -= quote_amount
         self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
+        
+        # 更新市场价格为 AMM 隐含价格
+        if self.amm_reserve_base > D0:
+            self.price = self.get_amm_price()
+            self.update_consensus_price()
 
         return base_amount, quote_amount
 
@@ -283,6 +293,7 @@ class TradingPair(EngineNode):
                     # 记录成交
                     self.log.append((time.time(), match_price, match_volume, D0, D0))
                     self.price = match_price
+                    self.update_consensus_price()
 
                     trade_details.append({
                         "price": match_price,
@@ -336,6 +347,7 @@ class TradingPair(EngineNode):
                     # 记录成交
                     self.log.append((time.time(), match_price, match_volume, D0, D0))
                     self.price = match_price
+                    self.update_consensus_price()
 
                     trade_details.append({
                         "price": match_price,
@@ -451,6 +463,7 @@ class TradingPair(EngineNode):
             # 记录成交
             self.log.append((time.time(), match_price, match_volume, D0, D0))
             self.price = match_price
+            self.update_consensus_price()
 
             # 完成订单处理
             if best_buy.remaining_volume <= D0:
@@ -613,6 +626,7 @@ class TradingPair(EngineNode):
 
             # 更新市场价格
             self.price = match_price
+            self.update_consensus_price()
 
             remaining -= match_volume
 
@@ -631,6 +645,8 @@ class TradingPair(EngineNode):
             self.amm_reserve_quote = max(D0, self.amm_reserve_quote - quote_spent)
             self.amm_reserve_base += executed_volume
             self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
+            # 套利后更新共识价格
+            self._update_consensus_price_after_match()
 
         return remaining
 
@@ -673,6 +689,7 @@ class TradingPair(EngineNode):
 
             # 更新市场价格
             self.price = match_price
+            self.update_consensus_price()
 
             remaining -= match_volume
 
@@ -691,74 +708,10 @@ class TradingPair(EngineNode):
             self.amm_reserve_base -= executed_volume
             self.amm_reserve_quote = max(D0, self.amm_reserve_quote + quote_earned)
             self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
+            # 套利后更新共识价格
+            self._update_consensus_price_after_match()
 
         return remaining
-
-    def _amm_swap_base_for_quote(self, base_amount: Decimal) -> Decimal:
-        """
-        AMM 池：用 quote_token 购买 base_token
-
-        根据恒定乘积公式计算需要支付的 quote_token 数量。
-
-        Args:
-            base_amount: 要购买的 base_token 数量
-
-        Returns:
-            需要支付的 quote_token 数量
-        """
-        if base_amount <= D0 or base_amount >= self.amm_reserve_base:
-            return D0
-
-        # 恒定乘积公式：k = reserve_base * reserve_quote
-        # 购买后：new_base = reserve_base - base_amount
-        #       new_quote = k / new_base
-        # 需要支付的 quote = new_quote - reserve_quote
-        
-        new_reserve_base = self.amm_reserve_base - base_amount
-        new_reserve_quote = self.amm_k / new_reserve_base
-        quote_amount = new_reserve_quote - self.amm_reserve_quote
-
-        # 更新储备
-        self.amm_reserve_base = new_reserve_base
-        self.amm_reserve_quote = new_reserve_quote
-
-        # 更新市场价格为 AMM 隐含价格
-        self.price = self.get_amm_price()
-
-        return quote_amount
-
-    def _amm_swap_quote_for_base(self, quote_amount: Decimal) -> Decimal:
-        """
-        AMM 池：用 base_token 购买 quote_token
-
-        根据恒定乘积公式计算可以获得的 base_token 数量。
-
-        Args:
-            quote_amount: 要支付的 quote_token 数量
-
-        Returns:
-            可以获得的 base_token 数量
-        """
-        if quote_amount <= D0:
-            return D0
-
-        # 恒定乘积公式：k = reserve_base * reserve_quote
-        # 支付后：new_quote = reserve_quote + quote_amount
-        #       new_base = k / new_quote
-        # 可以获得的 base = reserve_base - new_base
-        
-        new_reserve_quote = self.amm_reserve_quote + quote_amount
-        new_reserve_base = self.amm_k / new_reserve_quote
-        base_amount = self.amm_reserve_base - new_reserve_base
-
-        # 更新储备
-        self.amm_reserve_base = new_reserve_base
-        self.amm_reserve_quote = new_reserve_quote
-
-        # 更新市场价格为 AMM 隐含价格
-        self.price = self.get_amm_price()
-
-        return base_amount
 
     def _execute_amm_market_order(
         self, trader: Trader, direction: str, volume: Decimal
@@ -827,6 +780,7 @@ class TradingPair(EngineNode):
             
             # 更新市场价格
             self.price = self.get_amm_price()
+            self.update_consensus_price()
             
             # 记录成交
             self.log.append((time.time(), self.price, max_base, D0, D0))
@@ -873,6 +827,7 @@ class TradingPair(EngineNode):
             
             # 更新市场价格
             self.price = self.get_amm_price()
+            self.update_consensus_price()
             
             # 记录成交
             self.log.append((time.time(), self.price, max_sell, D0, D0))

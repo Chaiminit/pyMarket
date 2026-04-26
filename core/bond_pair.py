@@ -70,6 +70,7 @@ class BondTradingPair(EngineNode):
         super().__init__(token.name)
         self.token = token
         self.current_rate = to_decimal(initial_rate)
+        self.consensus_rate = self.current_rate  # 共识利率（买卖盘口平均利率）
         self.log: List[Tuple[float, Decimal, Decimal, Decimal, Decimal]] = []
         self.buy_orders: List[BondOrder] = []
         self.sell_orders: List[BondOrder] = []
@@ -92,6 +93,24 @@ class BondTradingPair(EngineNode):
         for trader in traders:
             total += trader.bonds.get(self.token, D0)
         return total
+
+    def update_consensus_rate(self) -> None:
+        """
+        更新共识利率为买卖盘口的平均利率
+
+        当其中一方不存在时，设为另一方利率。
+        当双方都不存在时，保持当前共识利率。
+        """
+        best_buy = self.buy_orders[0].interest_rate if self.buy_orders else None
+        best_sell = self.sell_orders[0].interest_rate if self.sell_orders else None
+
+        if best_buy is not None and best_sell is not None:
+            self.consensus_rate = (best_buy + best_sell) / to_decimal("2")
+        elif best_buy is not None:
+            self.consensus_rate = best_buy
+        elif best_sell is not None:
+            self.consensus_rate = best_sell
+        # 双方都不存在时保持当前共识利率
 
     def settle_interest_simple(
         self, traders: Set[Trader], dt_seconds
@@ -280,6 +299,7 @@ class BondTradingPair(EngineNode):
             # 记录成交（包含手续费）
             self.log.append((time.time(), match_rate, match_volume, D0, D0))
             self.current_rate = match_rate
+            self.update_consensus_rate()
 
             # 完成订单处理
             if best_buy.remaining_volume <= D0:
