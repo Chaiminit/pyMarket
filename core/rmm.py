@@ -93,6 +93,9 @@ class ReflexiveMarketMaker(EngineNode):
 
     def get_current_fee_rate(self, pair) -> Decimal:
         pool = self._get_pool(pair)
+        # 当池子没有流动性时，返回最小手续费率作为冷启动费率
+        if pool.reserve_base <= D0 or pool.reserve_quote <= D0:
+            return self.min_fee_rate
         return pool.current_fee_rate
 
     def arbitrage_after_match(self, pair) -> Dict[str, Decimal]:
@@ -528,35 +531,40 @@ class ReflexiveMarketMaker(EngineNode):
         手续费比例限制：
         - 手续费比例必须在 min_fee_rate 和 max_fee_rate 之间
         - 实时收费换算为手续费比例并保存到池子数据中
+        - 当池子没有流动性时，收取 min_fee_rate 作为冷启动手续费
         """
         pool = self._get_pool(pair)
-
-        if arbitrage_result.get("direction") == "none":
-            return
-
-        volume = arbitrage_result.get("volume", D0)
-        avg_price = arbitrage_result.get("avg_price", D0)
-        pre_consensus_price = arbitrage_result.get("pre_consensus_price", D0)
-
-        if volume <= D0 or avg_price <= D0 or pre_consensus_price <= D0:
-            return
 
         trade_value = match_volume * match_price
         if trade_value <= D0:
             return
 
-        direction = arbitrage_result["direction"]
-        if direction == "buy":
-            slippage_cost = (avg_price - pre_consensus_price) * volume
+        # 检查是否有套利发生
+        has_arbitrage = arbitrage_result.get("direction") != "none"
+        
+        if has_arbitrage:
+            # 有套利时，根据滑点计算手续费
+            volume = arbitrage_result.get("volume", D0)
+            avg_price = arbitrage_result.get("avg_price", D0)
+            pre_consensus_price = arbitrage_result.get("pre_consensus_price", D0)
+
+            if volume <= D0 or avg_price <= D0 or pre_consensus_price <= D0:
+                return
+
+            direction = arbitrage_result["direction"]
+            if direction == "buy":
+                slippage_cost = (avg_price - pre_consensus_price) * volume
+            else:
+                slippage_cost = (pre_consensus_price - avg_price) * volume
+
+            if slippage_cost <= D0:
+                return
+
+            raw_fee_rate = slippage_cost / trade_value
+            fee_rate = max(self.min_fee_rate, min(self.max_fee_rate, raw_fee_rate))
         else:
-            slippage_cost = (pre_consensus_price - avg_price) * volume
-
-        if slippage_cost <= D0:
-            return
-
-        raw_fee_rate = slippage_cost / trade_value
-
-        fee_rate = max(self.min_fee_rate, min(self.max_fee_rate, raw_fee_rate))
+            # 无套利时（池子为空），收取最小手续费作为冷启动资金
+            fee_rate = self.min_fee_rate
 
         pool.current_fee_rate = fee_rate
 
@@ -610,32 +618,43 @@ class ReflexiveMarketMaker(EngineNode):
         手续费比例限制：
         - 手续费比例必须在 min_fee_rate 和 max_fee_rate 之间
         - 实时收费换算为手续费比例并保存到池子数据中
+        - 当池子没有流动性时，收取 min_fee_rate 作为冷启动手续费
         """
         pool = self._get_pool(pair)
 
-        volume = arbitrage_result.get("volume", D0)
         avg_price = arbitrage_result.get("avg_price", D0)
-        pre_consensus_price = arbitrage_result.get("pre_consensus_price", D0)
-
-        if volume <= D0 or avg_price <= D0 or pre_consensus_price <= D0:
+        if avg_price <= D0:
             return
 
         trade_value = total_volume * avg_price
         if trade_value <= D0:
             return
 
-        arb_direction = arbitrage_result["direction"]
-        if arb_direction == "buy":
-            slippage_cost = (avg_price - pre_consensus_price) * volume
+        # 检查是否有套利发生
+        has_arbitrage = arbitrage_result.get("direction") != "none"
+
+        if has_arbitrage:
+            # 有套利时，根据滑点计算手续费
+            volume = arbitrage_result.get("volume", D0)
+            pre_consensus_price = arbitrage_result.get("pre_consensus_price", D0)
+
+            if volume <= D0 or pre_consensus_price <= D0:
+                return
+
+            arb_direction = arbitrage_result["direction"]
+            if arb_direction == "buy":
+                slippage_cost = (avg_price - pre_consensus_price) * volume
+            else:
+                slippage_cost = (pre_consensus_price - avg_price) * volume
+
+            if slippage_cost <= D0:
+                return
+
+            raw_fee_rate = slippage_cost / trade_value
+            fee_rate = max(self.min_fee_rate, min(self.max_fee_rate, raw_fee_rate))
         else:
-            slippage_cost = (pre_consensus_price - avg_price) * volume
-
-        if slippage_cost <= D0:
-            return
-
-        raw_fee_rate = slippage_cost / trade_value
-
-        fee_rate = max(self.min_fee_rate, min(self.max_fee_rate, raw_fee_rate))
+            # 无套利时（池子为空），收取最小手续费作为冷启动资金
+            fee_rate = self.min_fee_rate
 
         pool.current_fee_rate = fee_rate
 

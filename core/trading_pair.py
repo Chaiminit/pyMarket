@@ -148,24 +148,12 @@ class TradingPair(EngineNode):
             price: 限价
             volume: 数量
             frozen_amount: 冻结资金（买单）或资产（卖单）
+                         注意：资金已在 Trader.submit_limit_order 中被扣除
         """
         with self._lock:
             frozen_amount = to_decimal(frozen_amount)
-            if direction == "buy":
-                if trader.assets.get(self.quote_token, D0) < frozen_amount:
-                    raise ValueError(
-                        f"余额不足：需要 {frozen_amount} {self.quote_token.token_id}，"
-                        f"可用 {trader.assets.get(self.quote_token, D0)}"
-                    )
-                trader.assets[self.quote_token] = trader.assets.get(self.quote_token, D0) - frozen_amount
-            else:
-                if trader.assets.get(self.base_token, D0) < frozen_amount:
-                    raise ValueError(
-                        f"余额不足：需要 {frozen_amount} {self.base_token.token_id}，"
-                        f"可用 {trader.assets.get(self.base_token, D0)}"
-                    )
-                trader.assets[self.base_token] = trader.assets.get(self.base_token, D0) - frozen_amount
-
+            # 注意：资金已经在 Trader.submit_limit_order 中被扣除
+            # 这里只负责创建订单，不再重复扣除
             order = Order(trader, direction, price, volume, frozen_amount, self)
 
             if direction == "buy":
