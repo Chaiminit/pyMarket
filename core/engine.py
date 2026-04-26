@@ -23,7 +23,6 @@ from .bond_pair import BondTradingPair
 from .trader import Trader
 from .token import Token
 from .liquidation import LiquidationEngine, LiquidationResult
-from .fees import FeeConfig
 from .corp import Corp
 from .utils import to_decimal, D0
 from .engine_node import EngineNode
@@ -102,10 +101,6 @@ class MarketEngine:
         self._last_step_time: Optional[float] = None  # 上次调用 step 的时间戳
         self._liquidation_engine = LiquidationEngine(self)
         self._nodes: Set[EngineNode] = set()  # 所有引擎节点（自动注册）
-
-        # 全局默认手续费配置（默认为零手续费）
-        self._default_trading_fee_config: FeeConfig = FeeConfig()
-        self._default_bond_fee_config: FeeConfig = FeeConfig()
 
     # ====== 代币管理 ======
 
@@ -206,7 +201,6 @@ class MarketEngine:
         base_token_name: str,
         quote_token_name: str,
         initial_price,
-        fee_config: Optional[FeeConfig] = None,
         **kwargs
     ) -> TradingPair:
         """
@@ -216,7 +210,6 @@ class MarketEngine:
             base_token_name: 基础代币名称
             quote_token_name: 计价代币名称
             initial_price: 初始价格
-            fee_config: 手续费配置，None 则使用全局默认配置
             **kwargs: 传递给 trading_pair_class 的额外参数
 
         Returns:
@@ -233,9 +226,7 @@ class MarketEngine:
         if quote_token is None:
             raise ValueError(f"计价代币 {quote_token_name} 不存在")
 
-        # 使用传入的配置或全局默认配置
-        config = fee_config if fee_config is not None else self._default_trading_fee_config
-        pair = self._trading_pair_class(base_token, quote_token, initial_price, config, **kwargs)
+        pair = self._trading_pair_class(base_token, quote_token, initial_price, **kwargs)
         self.trading_pairs.append(pair)
         self._nodes.add(pair)
         pair._engine = self
@@ -265,7 +256,6 @@ class MarketEngine:
         self,
         token_name: str,
         initial_rate,
-        fee_config: Optional[FeeConfig] = None,
         **kwargs
     ) -> BondTradingPair:
         """
@@ -274,7 +264,6 @@ class MarketEngine:
         Args:
             token_name: 标的代币名称
             initial_rate: 初始利率（年化）
-            fee_config: 手续费配置，None 则使用全局默认配置
             **kwargs: 传递给 bond_trading_pair_class 的额外参数
 
         Returns:
@@ -287,9 +276,7 @@ class MarketEngine:
         if token is None:
             raise ValueError(f"代币 {token_name} 不存在")
 
-        # 使用传入的配置或全局默认配置
-        config = fee_config if fee_config is not None else self._default_bond_fee_config
-        bond_pair = self._bond_trading_pair_class(token, initial_rate, config, **kwargs)
+        bond_pair = self._bond_trading_pair_class(token, initial_rate, **kwargs)
         self.bond_trading_pairs.append(bond_pair)
         self._nodes.add(bond_pair)
         bond_pair._engine = self
@@ -590,44 +577,6 @@ class MarketEngine:
         """
         return self._liquidation_engine.liquidation_history
 
-    # ====== 手续费配置 ======
-
-    def set_default_trading_fee_config(self, fee_config: FeeConfig) -> None:
-        """
-        设置默认现货交易手续费配置
-
-        Args:
-            fee_config: 手续费配置
-        """
-        self._default_trading_fee_config = fee_config
-
-    def set_default_bond_fee_config(self, fee_config: FeeConfig) -> None:
-        """
-        设置默认债券交易手续费配置
-
-        Args:
-            fee_config: 手续费配置
-        """
-        self._default_bond_fee_config = fee_config
-
-    def get_default_trading_fee_config(self) -> FeeConfig:
-        """
-        获取默认现货交易手续费配置
-
-        Returns:
-            默认手续费配置
-        """
-        return self._default_trading_fee_config
-
-    def get_default_bond_fee_config(self) -> FeeConfig:
-        """
-        获取默认债券交易手续费配置
-
-        Returns:
-            默认手续费配置
-        """
-        return self._default_bond_fee_config
-
     def get_all_collected_fees(self) -> Dict[Token, Decimal]:
         """
         获取所有交易对收集的手续费总额
@@ -635,23 +584,7 @@ class MarketEngine:
         Returns:
             {Token: 手续费金额}
         """
-        total_fees: Dict[Token, Decimal] = {}
-
-        # 汇总现货交易手续费
-        for pair in self.trading_pairs:
-            fees = pair.get_collected_fees()
-            if isinstance(fees, dict):
-                for token, amount in fees.items():
-                    total_fees[token] = total_fees.get(token, D0) + amount
-
-        # 汇总债券交易手续费
-        for bond_pair in self.bond_trading_pairs:
-            fees = bond_pair.get_collected_fees()
-            if isinstance(fees, dict):
-                for token, amount in fees.items():
-                    total_fees[token] = total_fees.get(token, D0) + amount
-
-        return total_fees
+        return {}
 
     def run(self, fps: float = 60.0) -> None:
         """

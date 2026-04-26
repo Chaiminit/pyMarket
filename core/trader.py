@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from .trading_pair import TradingPair
     from .bond_pair import BondTradingPair
     from .order import Order, BondOrder
-    from .governance import GovernanceProposal
 
 
 class Trader(EngineNode):
@@ -208,9 +207,6 @@ class Trader(EngineNode):
         """
         提交普通限价单
 
-        对于买单，冻结的金额包含预估的手续费（按Taker费率计算最坏情况）。
-        实际成交时按Maker费率计算，多余部分会返还。
-
         Args:
             pair: 交易对
             direction: 'buy' 或 'sell'
@@ -220,35 +216,24 @@ class Trader(EngineNode):
         Returns:
             是否提交成功（资金/资产充足时成功）
         """
-        from .fees import FeeDirection
-
         price = to_decimal(price)
         volume = to_decimal(volume)
-        fee_config = pair.get_fee_config()
 
         if direction == "buy":
             trade_amount = price * volume
-
-            # 计算预估手续费（按最坏情况Taker费率）
-            estimated_fee = D0
-            if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
-                estimated_fee = trade_amount * fee_config.taker_rate
-
-            total_required = trade_amount + estimated_fee
             available = self.assets.get(pair.quote_token, D0)
 
-            if available < total_required:
+            if available < trade_amount:
                 return False
 
             try:
-                self.assets[pair.quote_token] = available - total_required
-                pair.submit_limit_order(self, direction, price, volume, total_required)
+                self.assets[pair.quote_token] = available - trade_amount
+                pair.submit_limit_order(self, direction, price, volume, trade_amount)
             except ValueError:
                 # 返还资金，恢复状态
                 self.assets[pair.quote_token] = available
                 raise
         else:  # sell
-            # 卖单冻结资产，手续费从成交所得中扣除
             available = self.assets.get(pair.base_token, D0)
             if available < volume:
                 return False
@@ -294,33 +279,9 @@ class Trader(EngineNode):
         quote_amount = to_decimal(quote_amount)
 
         if direction == "buy":
-            # 买入：计算能用 quote_amount 买到多少标的代币
-            # 需要考虑手续费，实际可用于购买的资金会减少
-            fee_config = pair.get_fee_config()
-            from .fees import FeeDirection
-
-            # 预估手续费（按最坏情况Taker费率）
-            estimated_fee_rate = D0
-            if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
-                estimated_fee_rate = fee_config.taker_rate
-
-            # 实际可用于购买的资金 = 总金额 / (1 + 手续费率)
-            available_for_trade = quote_amount / (D1 + estimated_fee_rate) if estimated_fee_rate > D0 else quote_amount
-            volume = available_for_trade / pair.price
+            volume = quote_amount / pair.price
         else:
-            # 卖出：计算需要卖出多少标的代币才能获得 quote_amount
-            # 需要考虑手续费，实际卖出的标的代币数量会增加
-            fee_config = pair.get_fee_config()
-            from .fees import FeeDirection
-
-            # 预估手续费率
-            estimated_fee_rate = D0
-            if fee_config.direction in (FeeDirection.SELLER, FeeDirection.BOTH):
-                estimated_fee_rate = fee_config.taker_rate
-
-            # 需要卖出的标的代币价值 = 期望获得金额 / (1 - 手续费率)
-            required_value = quote_amount / (D1 - estimated_fee_rate) if estimated_fee_rate > D0 and estimated_fee_rate < D1 else quote_amount
-            volume = required_value / pair.price
+            volume = quote_amount / pair.price
 
         return pair.execute_market_order(self, direction, volume)
 
@@ -333,8 +294,6 @@ class Trader(EngineNode):
         - 买单（buy）：借出资金，支付代币，获得正债券（债权）
         - 卖单（sell）：借入资金，获得代币，获得负债券（债务）
 
-        对于债券买单，冻结的金额包含预估的手续费。
-
         Args:
             bond_pair: 债券交易对
             direction: 'buy' 或 'sell'
@@ -344,31 +303,20 @@ class Trader(EngineNode):
         Returns:
             是否提交成功
         """
-        from .fees import FeeDirection
-
         interest_rate = to_decimal(interest_rate)
         volume = to_decimal(volume)
-        fee_config = bond_pair.get_fee_config()
 
         if direction == "buy":
-            # 买单：需要预先拥有代币来借出资金
-
-            # 计算预估手续费（按最坏情况Taker费率）
-            estimated_fee = D0
-            if fee_config.direction in (FeeDirection.BUYER, FeeDirection.BOTH):
-                estimated_fee = volume * fee_config.taker_rate
-
-            total_required = volume + estimated_fee
             available = self.assets.get(bond_pair.token, D0)
 
-            if available < total_required:
+            if available < volume:
                 return False
 
-            self.assets[bond_pair.token] = available - total_required
-            bond_pair.submit_limit_order(self, direction, interest_rate, volume, total_required)
+            self.assets[bond_pair.token] = available - volume
+            bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
         else:  # sell
             # 卖单：借入资金，冻结债务额度（负债券）
-            # 成交后会获得代币和负债券（债务），手续费从所得中扣除
+            # 成交后会获得代币和负债券（债务）
             self.bonds[bond_pair.token] = self.bonds.get(bond_pair.token, D0) - volume
             bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
 
@@ -391,50 +339,3 @@ class Trader(EngineNode):
             order.close()
             return True
         return False
-
-    # ====== 治理投票回调方法 ======
-
-    def on_vote_cast(
-        self,
-        proposal: "GovernanceProposal",
-        option: str,
-        weight: float
-    ) -> None:
-        """
-        当该交易者参与投票时被调用
-
-        子类可以重写此方法来实现自定义的投票逻辑或通知。
-
-        Args:
-            proposal: 治理提案
-            option: 选择的选项
-            weight: 投票权重
-
-        Examples:
-            >>> class MyTrader(Trader):
-            ...     def on_vote_cast(self, proposal, option, weight):
-            ...         print(f"投票给 {proposal.title}: {option}")
-        """
-        pass
-
-    def on_proposal_reached_quorum(
-        self,
-        proposal: "GovernanceProposal",
-        result: Dict[str, Any]
-    ) -> None:
-        """
-        当该交易者创建的提案达到最低参与率时被调用
-
-        子类可以重写此方法来实现自定义的提案执行逻辑。
-
-        Args:
-            proposal: 治理提案
-            result: 投票结果统计
-
-        Examples:
-            >>> class MyTrader(Trader):
-            ...     def on_proposal_reached_quorum(self, proposal, result):
-            ...         if result['is_valid']:
-            ...             print(f"提案通过: {result['winner']}")
-        """
-        pass
