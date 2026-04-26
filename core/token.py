@@ -30,21 +30,19 @@ class Token(EngineNode):
         True
     """
 
-    def __init__(self, name: str, token_id: int, is_quote: bool = False
+    def __init__(self, token_id: int, is_quote: bool = False
     ):
         """
         创建代币实例
 
         Args:
-            name: 代币名称
             token_id: 唯一标识符
             is_quote: 是否为计价代币
         """
-        self.name = name
         self.token_id = token_id
         self.is_quote = is_quote
         self._engine = None
-        super().__init__(name)
+        super().__init__(f"Token({self.token_id})")
 
     def __hash__(self) -> int:
         """基于token_id的哈希，支持作为字典键"""
@@ -58,4 +56,4 @@ class Token(EngineNode):
 
     def __repr__(self) -> str:
         """字符串表示"""
-        return f"Token({self.name})"
+        return f"Token({self.token_id})"

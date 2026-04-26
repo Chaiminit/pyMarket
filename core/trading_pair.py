@@ -63,7 +63,7 @@ class TradingPair(EngineNode):
             quote_token: 计价代币
             initial_price: 初始价格
         """
-        super().__init__(f"{base_token.name}/{quote_token.name}")
+        super().__init__(f"{base_token.token_id}/{quote_token.token_id}")
         self.base_token = base_token
         self.quote_token = quote_token
         self.price = to_decimal(initial_price)
@@ -83,27 +83,10 @@ class TradingPair(EngineNode):
         # 共识价格（买卖盘口平均价格）
         self.consensus_price = self.price
 
-    def inject_amm_liquidity(self, base_amount) -> None:
-        """
-        向 AMM 池注入流动性
-
-        Args:
-            base_amount: 注入的 base_token 数量
-        """
-        base_amount = to_decimal(base_amount)
-        if base_amount <= D0:
-            raise ValueError("注入量必须大于0")
-
-        quote_amount = base_amount * self.consensus_price
-
-        self.amm_reserve_base += base_amount
-        self.amm_reserve_quote += quote_amount
-        self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
-        
-        # 更新市场价格为 AMM 隐含价格
-        if self.amm_reserve_base > D0:
-            self.price = self.get_amm_price()
-            self.update_consensus_price()
+        # AMM 手续费比例设置
+        self.amm_min_fee_rate = to_decimal("0.00001")  # 最小手续费比例 0.001%
+        self.amm_max_fee_rate = to_decimal("0.1")   # 最大手续费比例 10%
+        self.amm_current_fee_rate = self.amm_min_fee_rate  # 当前手续费比例
 
     def withdraw_amm_liquidity(self, base_amount) -> Tuple[Decimal, Decimal]:
         """
@@ -202,7 +185,7 @@ class TradingPair(EngineNode):
                 # 买单：冻结计价代币(USDT)
                 if trader.assets.get(self.quote_token, D0) < frozen_amount:
                     raise ValueError(
-                        f"余额不足：需要 {frozen_amount} {self.quote_token.name}，"
+                        f"余额不足：需要 {frozen_amount} {self.quote_token.token_id}，"
                         f"可用 {trader.assets.get(self.quote_token, D0)}"
                     )
                 trader.assets[self.quote_token] = trader.assets.get(self.quote_token, D0) - frozen_amount
@@ -210,7 +193,7 @@ class TradingPair(EngineNode):
                 # 卖单：冻结基础代币
                 if trader.assets.get(self.base_token, D0) < frozen_amount:
                     raise ValueError(
-                        f"余额不足：需要 {frozen_amount} {self.base_token.name}，"
+                        f"余额不足：需要 {frozen_amount} {self.base_token.token_id}，"
                         f"可用 {trader.assets.get(self.base_token, D0)}"
                     )
                 trader.assets[self.base_token] = trader.assets.get(self.base_token, D0) - frozen_amount
@@ -239,6 +222,10 @@ class TradingPair(EngineNode):
         市价单会遍历对手方订单簿，尽可能成交指定数量。
         如果市场深度不足，只成交可成交的部分。
 
+        滑点成本处理：
+        市价单执行完成后，AMM会执行套利跟踪共识价格。滑点成本由市价单发起方
+        和所有参与交易的对手方按成交量比例分担，以手续费形式支付给AMM。
+
         Args:
             trader: 下单交易者
             direction: 'buy' 或 'sell'
@@ -257,6 +244,8 @@ class TradingPair(EngineNode):
             total_cost_or_revenue = D0
             total_fee = D0
             trade_details: List[Dict] = []
+            # 记录所有参与交易的对手方及其成交量（用于后续滑点成本分摊）
+            counterparties: List[Tuple[Trader, Decimal]] = []
 
             if direction == "buy":
                 # 买入：与卖单簿撮合（市价买单是Taker，限价卖单是Maker）
@@ -303,6 +292,9 @@ class TradingPair(EngineNode):
                         "seller_fee": D0,
                         "counterparty": seller,
                     })
+
+                    # 记录对手方及其成交量
+                    counterparties.append((seller, match_volume))
 
                     volume -= match_volume
                     executed_volume += match_volume
@@ -358,6 +350,9 @@ class TradingPair(EngineNode):
                         "counterparty": buyer,
                     })
 
+                    # 记录对手方及其成交量
+                    counterparties.append((buyer, match_volume))
+
                     volume -= match_volume
                     executed_volume += match_volume
                     total_cost_or_revenue += match_revenue
@@ -378,6 +373,15 @@ class TradingPair(EngineNode):
                 trade_details.extend(amm_trade_details)
                 total_fee += amm_fee
 
+            # 市价单执行完成后，根据最新共识价格执行AMM套利
+            arbitrage_result = self._arbitrage_after_match()
+
+            # 计算并收取滑点成本补偿费（由市价单发起方和所有对手方按成交量比例分担）
+            if executed_volume > D0 and arbitrage_result.get("direction") != "none":
+                self._charge_slippage_compensation_market_order(
+                    trader, counterparties, executed_volume, direction, arbitrage_result
+                )
+
             return executed_volume, trade_details, total_fee
 
     def _match_orders(self) -> None:
@@ -391,6 +395,11 @@ class TradingPair(EngineNode):
         4. 成交价为卖单价格（被动方价格）
         5. 双方都是 Maker（限价单撮合）
         6. 重复直到无法撮合
+
+        滑点成本处理：
+        每笔撮合后，AMM会执行套利跟踪共识价格。由于AMM作为最后流动性提供者，
+        其套利成交价格与前共识价格存在滑点。该滑点成本由买卖双方按最新共识价格
+        比例支付手续费给AMM作为补偿。
         """
         while self.buy_orders and self.sell_orders:
             best_buy = self.buy_orders[0]
@@ -465,16 +474,262 @@ class TradingPair(EngineNode):
             self.price = match_price
             self.update_consensus_price()
 
+            # 撮合后立即执行AMM套利，使储备比例等于新的共识价格
+            arbitrage_result = self._arbitrage_after_match()
+
+            # 计算并收取滑点成本手续费
+            self._charge_slippage_compensation(
+                buyer, seller, arbitrage_result, match_volume, match_price
+            )
+
             # 完成订单处理
+            # 注意：AMM套利可能已经将订单从订单簿中移除，需要检查
             if best_buy.remaining_volume <= D0:
                 if best_buy in buyer.orders:
                     buyer.orders.remove(best_buy)
-                self.buy_orders.remove(best_buy)
+                if best_buy in self.buy_orders:
+                    self.buy_orders.remove(best_buy)
 
             if best_sell.remaining_volume <= D0:
                 if best_sell in seller.orders:
                     seller.orders.remove(best_sell)
-                self.sell_orders.remove(best_sell)
+                if best_sell in self.sell_orders:
+                    self.sell_orders.remove(best_sell)
+
+    def _charge_slippage_compensation(
+        self,
+        buyer: Trader,
+        seller: Trader,
+        arbitrage_result: Dict[str, Decimal],
+        match_volume: Decimal,
+        match_price: Decimal,
+    ) -> None:
+        """
+        收取滑点成本补偿费给AMM
+
+        当AMM为了跟踪共识价格进行套利时，由于作为最后流动性提供者，
+        其成交价格与前共识价格存在滑点。该滑点成本由买卖双方按最新
+        共识价格比例支付手续费给AMM作为补偿。
+
+        手续费比例限制：
+        - 手续费比例必须在 amm_min_fee_rate 和 amm_max_fee_rate 之间
+        - 实时收费换算为手续费比例并保存到 amm_current_fee_rate
+
+        Args:
+            buyer: 买方交易者
+            seller: 卖方交易者
+            arbitrage_result: AMM套利结果字典
+            match_volume: 撮合成交量
+            match_price: 撮合成交价格
+        """
+        # 检查是否有套利交易
+        if arbitrage_result.get("direction") == "none":
+            return
+
+        volume = arbitrage_result.get("volume", D0)
+        avg_price = arbitrage_result.get("avg_price", D0)
+        pre_consensus_price = arbitrage_result.get("pre_consensus_price", D0)
+
+        if volume <= D0 or avg_price <= D0 or pre_consensus_price <= D0:
+            return
+
+        # 计算成交额
+        trade_value = match_volume * match_price
+        if trade_value <= D0:
+            return
+
+        # 计算原始滑点成本
+        direction = arbitrage_result["direction"]
+        if direction == "buy":
+            slippage_cost = (avg_price - pre_consensus_price) * volume
+        else:  # sell
+            slippage_cost = (pre_consensus_price - avg_price) * volume
+
+        if slippage_cost <= D0:
+            return
+
+        # 计算原始手续费比例
+        raw_fee_rate = slippage_cost / trade_value
+
+        # 限制手续费比例在最小和最大之间
+        fee_rate = max(self.amm_min_fee_rate, min(self.amm_max_fee_rate, raw_fee_rate))
+
+        # 保存当前手续费比例
+        self.amm_current_fee_rate = fee_rate
+
+        # 根据限制后的比例计算实际手续费
+        total_fee_quote = trade_value * fee_rate
+
+        # 获取最新共识价格用于计算资产比例
+        current_consensus_price = self.consensus_price
+        if current_consensus_price <= D0:
+            return
+
+        # 按共识价格换算成base数量
+        total_fee_base = total_fee_quote / current_consensus_price
+
+        # 按比例分摊给买卖双方（各承担一半）
+        buyer_fee_base = total_fee_base / to_decimal("2")
+        seller_fee_quote = total_fee_quote / to_decimal("2")
+
+        # 从买家资产中扣除base手续费
+        buyer_current_base = buyer.assets.get(self.base_token, D0)
+        if buyer_current_base >= buyer_fee_base:
+            buyer.assets[self.base_token] = buyer_current_base - buyer_fee_base
+        else:
+            buyer_fee_base = buyer_current_base
+            buyer.assets[self.base_token] = D0
+
+        # 从卖家资产中扣除quote手续费
+        seller_current_quote = seller.assets.get(self.quote_token, D0)
+        if seller_current_quote >= seller_fee_quote:
+            seller.assets[self.quote_token] = seller_current_quote - seller_fee_quote
+        else:
+            seller_fee_quote = seller_current_quote
+            seller.assets[self.quote_token] = D0
+
+        # 将手续费加到AMM储备中（纯利润）
+        if buyer_fee_base > D0:
+            self.amm_reserve_base += buyer_fee_base
+        if seller_fee_quote > D0:
+            self.amm_reserve_quote += seller_fee_quote
+
+        # 更新k值（因为储备增加了）
+        self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
+
+    def _charge_slippage_compensation_market_order(
+        self,
+        taker: Trader,
+        counterparties: List[Tuple[Trader, Decimal]],
+        total_volume: Decimal,
+        direction: str,
+        arbitrage_result: Dict[str, Decimal],
+    ) -> None:
+        """
+        收取市价单滑点成本补偿费给AMM
+
+        市价单场景下，滑点成本由市价单发起方（Taker）和所有参与交易的对手方（Makers）
+        按各自的成交量比例分担。
+
+        手续费比例限制：
+        - 手续费比例必须在 amm_min_fee_rate 和 amm_max_fee_rate 之间
+        - 实时收费换算为手续费比例并保存到 amm_current_fee_rate
+
+        Args:
+            taker: 市价单发起方
+            counterparties: 对手方列表 [(trader, volume), ...]
+            total_volume: 总成交量
+            direction: 'buy' 或 'sell'（市价单方向）
+            arbitrage_result: AMM套利结果字典
+        """
+        volume = arbitrage_result.get("volume", D0)
+        avg_price = arbitrage_result.get("avg_price", D0)
+        pre_consensus_price = arbitrage_result.get("pre_consensus_price", D0)
+
+        if volume <= D0 or avg_price <= D0 or pre_consensus_price <= D0:
+            return
+
+        # 计算成交额
+        trade_value = total_volume * avg_price
+        if trade_value <= D0:
+            return
+
+        # 计算原始滑点成本
+        arb_direction = arbitrage_result["direction"]
+        if arb_direction == "buy":
+            slippage_cost = (avg_price - pre_consensus_price) * volume
+        else:  # sell
+            slippage_cost = (pre_consensus_price - avg_price) * volume
+
+        if slippage_cost <= D0:
+            return
+
+        # 计算原始手续费比例
+        raw_fee_rate = slippage_cost / trade_value
+
+        # 限制手续费比例在最小和最大之间
+        fee_rate = max(self.amm_min_fee_rate, min(self.amm_max_fee_rate, raw_fee_rate))
+
+        # 保存当前手续费比例
+        self.amm_current_fee_rate = fee_rate
+
+        # 获取最新共识价格用于计算资产比例
+        current_consensus_price = self.consensus_price
+        if current_consensus_price <= D0:
+            return
+
+        # 根据限制后的比例计算实际手续费
+        total_fee_quote = trade_value * fee_rate
+        total_fee_base = total_fee_quote / current_consensus_price
+
+        # 计算每个参与者应该承担的份额
+        # 市价单发起方承担与其成交量成比例的份额
+        taker_volume = total_volume  # Taker的成交量就是总成交量
+        total_participants_volume = taker_volume + sum(v for _, v in counterparties)
+
+        if total_participants_volume <= D0:
+            return
+
+        # Taker承担的手续费
+        taker_share = taker_volume / total_participants_volume
+        taker_fee_base = total_fee_base * taker_share
+        taker_fee_quote = total_fee_quote * taker_share
+
+        # 从Taker资产中扣除
+        if direction == "buy":
+            # 买入市价单：Taker收到base，扣除base手续费
+            taker_current_base = taker.assets.get(self.base_token, D0)
+            if taker_current_base >= taker_fee_base:
+                taker.assets[self.base_token] = taker_current_base - taker_fee_base
+            else:
+                taker_fee_base = taker_current_base
+                taker.assets[self.base_token] = D0
+        else:
+            # 卖出市价单：Taker收到quote，扣除quote手续费
+            taker_current_quote = taker.assets.get(self.quote_token, D0)
+            if taker_current_quote >= taker_fee_quote:
+                taker.assets[self.quote_token] = taker_current_quote - taker_fee_quote
+            else:
+                taker_fee_quote = taker_current_quote
+                taker.assets[self.quote_token] = D0
+
+        # 将Taker的手续费加到AMM储备
+        if taker_fee_base > D0:
+            self.amm_reserve_base += taker_fee_base
+        if taker_fee_quote > D0:
+            self.amm_reserve_quote += taker_fee_quote
+
+        # 对手方承担的手续费
+        for counterparty, cp_volume in counterparties:
+            cp_share = cp_volume / total_participants_volume
+            cp_fee_base = total_fee_base * cp_share
+            cp_fee_quote = total_fee_quote * cp_share
+
+            if direction == "buy":
+                # 买入市价单：对手方（卖家）收到quote，扣除quote手续费
+                cp_current_quote = counterparty.assets.get(self.quote_token, D0)
+                if cp_current_quote >= cp_fee_quote:
+                    counterparty.assets[self.quote_token] = cp_current_quote - cp_fee_quote
+                else:
+                    cp_fee_quote = cp_current_quote
+                    counterparty.assets[self.quote_token] = D0
+            else:
+                # 卖出市价单：对手方（买家）收到base，扣除base手续费
+                cp_current_base = counterparty.assets.get(self.base_token, D0)
+                if cp_current_base >= cp_fee_base:
+                    counterparty.assets[self.base_token] = cp_current_base - cp_fee_base
+                else:
+                    cp_fee_base = cp_current_base
+                    counterparty.assets[self.base_token] = D0
+
+            # 将对手方的手续费加到AMM储备
+            if cp_fee_base > D0:
+                self.amm_reserve_base += cp_fee_base
+            if cp_fee_quote > D0:
+                self.amm_reserve_quote += cp_fee_quote
+
+        # 更新k值
+        self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
 
     def get_order_book(self, depth: int = 10) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
         """
@@ -524,9 +779,8 @@ class TradingPair(EngineNode):
         每个模拟步进时由 Engine 调用，子类可以重写此方法
         来实现自定义的每步逻辑（如价格更新、订单检查等）。
 
-        此方法会自动：
-        1. 更新共识价格（买卖盘口平均价格）
-        2. 执行 AMM 套利逻辑，使 AMM 池的隐含价格向共识价格收敛。
+        注意：AMM套利现在在每个撮合完成后立即执行，
+        不再在step中统一执行。
 
         Args:
             dt: 时间步长（秒）
@@ -537,55 +791,393 @@ class TradingPair(EngineNode):
             ...         # 每步更新价格
             ...         self.update_price()
         """
-        self.update_consensus_price()
-        self._amm_arbitrage(dt)
 
-    def _amm_arbitrage(self, dt: Decimal) -> None:
+    def _arbitrage_after_match(self) -> Dict[str, Decimal]:
         """
-        AMM 套利逻辑
+        撮合后执行AMM套利
+
+        在每次订单撮合完成后，根据最新的共识价格
+        立即执行AMM套利，使储备比例等于共识价格。
+
+        Returns:
+            包含套利成交信息的字典:
+            - direction: 'buy' 或 'sell' 或 'none'
+            - volume: 实际成交数量
+            - avg_price: 加权平均成交价格
+            - pre_consensus_price: 套利前的共识价格
+        """
+        # 使用dt=1.0表示一次性完成套利（不限制速度）
+        return self._amm_arbitrage(to_decimal("1.0"))
+
+    def _calculate_exact_arbitrage_volume(self) -> Tuple[Decimal, Decimal]:
+        """
+        计算使得交易后共识价格等于储备比例的精确交易量
+
+        数学原理：
+        设当前储备为 R_b, R_q，恒定乘积 k = R_b * R_q
+        当前AMM价格：P_amm = R_q / R_b = k / R_b^2
+        当前共识价格：P_c = (P_buy + P_sell) / 2
+
+        要使 P_amm' = P_c，需要调整 R_b 使得 k / R_b'^2 = P_c
+        解得目标储备：R_b' = sqrt(k / P_c)
+
+        关键洞察：
+        - 由 P = k / R_b^2 可知，R_b 越小，P 越大（价格与base储备成反比）
+        - 共识价格 > AMM价格：需要提高AMM价格 → 减少base储备 → 卖出base
+        - 共识价格 < AMM价格：需要降低AMM价格 → 增加base储备 → 买入base
+
+        交易方向：
+        - P_c > P_amm：卖出 Δ = R_b - R_b' = R_b - sqrt(k / P_c)
+        - P_c < P_amm：买入 Δ = R_b' - R_b = sqrt(k / P_c) - R_b
+
+        Returns:
+            (交易量Δ, 交易价格) 如果无法套利则返回 (0, 0)
+        """
+        if self.amm_k <= D0:
+            return D0, D0
+
+        amm_price = self.get_amm_price()
+        consensus_price = self.consensus_price
+
+        # 检查价格差异
+        if consensus_price <= D0 or amm_price <= D0:
+            return D0, D0
+
+        price_diff = consensus_price - amm_price
+        tolerance = consensus_price * to_decimal("0.0001")  # 0.01%容差
+
+        if abs(price_diff) <= tolerance:
+            return D0, D0
+
+        # 计算目标储备量（保持k不变）
+        # 由 P = k / R_b^2 得 R_b = sqrt(k / P)
+        target_base = (self.amm_k / consensus_price).sqrt()
+
+        if price_diff > D0:
+            # 共识价格 > AMM价格，需要卖出base（减少储备来提高价格）
+            # 检查买单簿
+            if not self.buy_orders:
+                return D0, D0
+            trade_price = self.buy_orders[0].price
+            delta = self.amm_reserve_base - target_base
+            if delta <= D0:
+                return D0, D0
+            return delta, trade_price
+        else:
+            # 共识价格 < AMM价格，需要买入base（增加储备来降低价格）
+            # 检查卖单簿
+            if not self.sell_orders:
+                return D0, D0
+            trade_price = self.sell_orders[0].price
+            delta = target_base - self.amm_reserve_base
+            if delta <= D0:
+                return D0, D0
+            return delta, trade_price
+
+    def _amm_arbitrage(self, dt: Decimal) -> Dict[str, Decimal]:
+        """
+        AMM 套利逻辑 - 精确版本
 
         当共识价格与 AMM 池隐含价格不一致时，通过订单簿进行套利交易
         使池子储备调整，直到隐含价格等于共识价格。
 
-        套利方向：
-        - 如果共识价格 > AMM 价格：从订单簿买入 base_token，
-          池子 base 增加，quote 减少，AMM 价格下降
-        - 如果共识价格 < AMM 价格：向订单簿卖出 base_token，
-          池子 base 减少，quote 增加，AMM 价格上升
+        套利方向（修正后）：
+        - 如果共识价格 > AMM 价格：AMM卖出 base_token（减少储备），
+          使AMM价格上升向共识价格收敛
+        - 如果共识价格 < AMM 价格：AMM买入 base_token（增加储备），
+          使AMM价格下降向共识价格收敛
 
         注意：AMM 套利只能通过订单簿执行，不允许直接修改池子储备。
 
         Args:
             dt: 时间步长（秒），用于控制套利速度
-        """
-        if self.amm_reserve_base <= D0 or self.amm_reserve_quote <= D0:
-            return
 
+        Returns:
+            包含套利成交信息的字典:
+            - direction: 'buy' 或 'sell' 或 'none'
+            - volume: 实际成交数量
+            - avg_price: 加权平均成交价格
+            - pre_consensus_price: 套利前的共识价格
+        """
+        # 记录套利前的共识价格
+        pre_consensus_price = self.consensus_price
+
+        if self.amm_reserve_base <= D0 or self.amm_reserve_quote <= D0:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 计算精确套利交易量
+        exact_volume, trade_price = self._calculate_exact_arbitrage_volume()
+
+        if exact_volume <= D0:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 根据价格差异方向选择套利操作
         amm_price = self.get_amm_price()
         consensus_price = self.consensus_price
-
-        # 计算价格差异
         price_diff = consensus_price - amm_price
 
-        # 如果价格差异很小，不需要套利
-        if abs(price_diff) / consensus_price < to_decimal("0.001"):
-            return
-
-        # 套利速度参数（可根据需要调整）
-        arbitrage_speed = to_decimal("0.01") * dt
+        # 不限制交易速度，一次性完成精确套利
+        target_volume = exact_volume
 
         if price_diff > D0:
-            # 共识价格 > AMM 价格，需要从订单簿买入 base_token
-            # 这会使 AMM 池 base 增加，quote 减少，AMM 价格下降
-            target_base = self.amm_reserve_base * arbitrage_speed
-            if target_base > D0:
-                self._amm_arbitrage_buy_from_orderbook(target_base)
+            # 共识价格 > AMM价格，AMM向订单簿卖出base
+            return self._amm_arbitrage_sell_from_orderbook_exact(
+                target_volume, trade_price, pre_consensus_price
+            )
         else:
-            # 共识价格 < AMM 价格，需要向订单簿卖出 base_token
-            # 这会使 AMM 池 base 减少，quote 增加，AMM 价格上升
-            target_base = self.amm_reserve_base * arbitrage_speed
-            if target_base > D0:
-                self._amm_arbitrage_sell_from_orderbook(target_base)
+            # 共识价格 < AMM价格，AMM从订单簿买入base
+            return self._amm_arbitrage_buy_from_orderbook_exact(
+                target_volume, trade_price, pre_consensus_price
+            )
+
+    def _amm_arbitrage_buy_from_orderbook_exact(
+        self, target_volume: Decimal, expected_price: Decimal, pre_consensus_price: Decimal
+    ) -> Dict[str, Decimal]:
+        """
+        AMM 精确套利：从订单簿买入 base_token，使得储备比例等于共识价格
+
+        核心原理：按照恒定乘积公式更新储备，而不是简单按成交价计算。
+        当AMM买入Δbase时：
+        - 新base储备：R_b' = R_b + Δ
+        - 新quote储备：R_q' = k / R_b'（保持k不变）
+        - 实际支付的quote：R_q - R_q'
+
+        Args:
+            target_volume: 目标买入量（已经过精确计算）
+            expected_price: 预期成交价格（当前卖一价）
+            pre_consensus_price: 套利前的共识价格（用于计算滑点成本）
+
+        Returns:
+            包含套利成交信息的字典
+        """
+        if target_volume <= D0 or not self.sell_orders:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 按照恒定乘积计算新的储备
+        # R_b' = R_b + Δ
+        new_reserve_base = self.amm_reserve_base + target_volume
+
+        # 检查是否超出储备限制（最多使用95%的quote储备）
+        max_quote_to_spend = self.amm_reserve_quote * to_decimal("0.95")
+
+        # 计算实际需要的quote（保持k不变）
+        new_reserve_quote = self.amm_k / new_reserve_base
+        quote_needed = self.amm_reserve_quote - new_reserve_quote
+
+        if quote_needed > max_quote_to_spend:
+            # 需要限制交易量
+            # 设最多使用 max_quote，则 R_q' = R_q - max_quote
+            # R_b' = k / R_q'
+            # Δ = R_b' - R_b
+            new_reserve_quote_limited = self.amm_reserve_quote - max_quote_to_spend
+            new_reserve_base_limited = self.amm_k / new_reserve_quote_limited
+            target_volume = new_reserve_base_limited - self.amm_reserve_base
+            if target_volume <= D0:
+                return {
+                    "direction": "none",
+                    "volume": D0,
+                    "avg_price": D0,
+                    "pre_consensus_price": pre_consensus_price,
+                }
+            new_reserve_base = new_reserve_base_limited
+            quote_needed = max_quote_to_spend
+
+        # 现在开始与订单簿交易，使用实际成交价格
+        remaining_to_buy = target_volume
+        total_quote_paid = D0
+        actual_base_bought = D0
+
+        while remaining_to_buy > D0 and self.sell_orders:
+            sell_order = self.sell_orders[0]
+            match_volume = min(remaining_to_buy, sell_order.remaining_volume)
+            match_price = sell_order.price
+
+            # AMM池支付quote，卖方收到quote
+            quote_paid = match_volume * match_price
+
+            # 检查AMM池是否有足够的quote
+            available_quote = self.amm_reserve_quote - total_quote_paid
+            if quote_paid > available_quote:
+                match_volume = available_quote / match_price
+                if match_volume <= D0:
+                    break
+                quote_paid = match_volume * match_price
+
+            # 卖方收到quote
+            seller = sell_order.trader
+            seller.assets[self.quote_token] = seller.assets.get(self.quote_token, D0) + quote_paid
+
+            # 更新卖单（注意：remaining_volume是计算属性，只能通过修改executed来改变）
+            sell_order.executed += match_volume
+            sell_order.remaining_frozen -= match_volume
+
+            # 累计交易
+            total_quote_paid += quote_paid
+            actual_base_bought += match_volume
+            remaining_to_buy -= match_volume
+
+            # 移除已完成的订单
+            if sell_order.remaining_volume <= D0:
+                if sell_order in seller.orders:
+                    seller.orders.remove(sell_order)
+                self.sell_orders.remove(sell_order)
+
+        # 更新AMM储备（使用恒定乘积公式）
+        if actual_base_bought > D0:
+            # 新的base储备
+            self.amm_reserve_base += actual_base_bought
+            # 新的quote储备（保持k不变）
+            self.amm_reserve_quote = self.amm_k / self.amm_reserve_base
+
+            # 更新市场价格和共识价格
+            self.price = self.get_amm_price()
+            self.update_consensus_price()
+
+            # 计算加权平均成交价格
+            avg_price = total_quote_paid / actual_base_bought if actual_base_bought > D0 else D0
+
+            return {
+                "direction": "buy",
+                "volume": actual_base_bought,
+                "avg_price": avg_price,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        return {
+            "direction": "none",
+            "volume": D0,
+            "avg_price": D0,
+            "pre_consensus_price": pre_consensus_price,
+        }
+
+    def _amm_arbitrage_sell_from_orderbook_exact(
+        self, target_volume: Decimal, expected_price: Decimal, pre_consensus_price: Decimal
+    ) -> Dict[str, Decimal]:
+        """
+        AMM 精确套利：向订单簿卖出 base_token，使得储备比例等于共识价格
+
+        核心原理：按照恒定乘积公式更新储备。
+        当AMM卖出Δbase时：
+        - 新base储备：R_b' = R_b - Δ
+        - 新quote储备：R_q' = k / R_b'（保持k不变）
+        - 实际获得的quote：R_q' - R_q
+
+        Args:
+            target_volume: 目标卖出量（已经过精确计算）
+            expected_price: 预期成交价格（当前买一价）
+            pre_consensus_price: 套利前的共识价格（用于计算滑点成本）
+
+        Returns:
+            包含套利成交信息的字典
+        """
+        if target_volume <= D0 or not self.buy_orders:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 按照恒定乘积计算新的储备
+        # R_b' = R_b - Δ
+        new_reserve_base = self.amm_reserve_base - target_volume
+
+        if new_reserve_base <= D0:
+            # 不能卖出全部，保留最小储备
+            new_reserve_base = self.amm_reserve_base * to_decimal("0.05")
+            target_volume = self.amm_reserve_base - new_reserve_base
+
+        # 检查是否超出储备限制（最多卖出95%的base储备）
+        max_base_to_sell = self.amm_reserve_base * to_decimal("0.95")
+        if target_volume > max_base_to_sell:
+            target_volume = max_base_to_sell
+            new_reserve_base = self.amm_reserve_base - target_volume
+
+        # 计算实际能获得的quote（保持k不变）
+        new_reserve_quote = self.amm_k / new_reserve_base
+        quote_to_receive = new_reserve_quote - self.amm_reserve_quote
+
+        if quote_to_receive <= D0:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 现在开始与订单簿交易
+        remaining_to_sell = target_volume
+        total_quote_received = D0
+        actual_base_sold = D0
+
+        while remaining_to_sell > D0 and self.buy_orders:
+            buy_order = self.buy_orders[0]
+            match_volume = min(remaining_to_sell, buy_order.remaining_volume)
+            match_price = buy_order.price
+
+            quote_received = match_volume * match_price
+
+            # 买方收到base
+            buyer = buy_order.trader
+            buyer.assets[self.base_token] = buyer.assets.get(self.base_token, D0) + match_volume
+
+            # 更新买单（注意：remaining_volume是计算属性，只能通过修改executed来改变）
+            buy_order.executed += match_volume
+            buy_order.remaining_frozen -= quote_received
+
+            # 累计交易
+            total_quote_received += quote_received
+            actual_base_sold += match_volume
+            remaining_to_sell -= match_volume
+
+            # 移除已完成的订单
+            if buy_order.remaining_volume <= D0:
+                if buy_order in buyer.orders:
+                    buyer.orders.remove(buy_order)
+                self.buy_orders.remove(buy_order)
+
+        # 更新AMM储备（使用恒定乘积公式）
+        if actual_base_sold > D0:
+            # 新的base储备
+            self.amm_reserve_base -= actual_base_sold
+            # 新的quote储备（保持k不变）
+            self.amm_reserve_quote = self.amm_k / self.amm_reserve_base
+
+            # 更新市场价格和共识价格
+            self.price = self.get_amm_price()
+            self.update_consensus_price()
+
+            # 计算加权平均成交价格
+            avg_price = total_quote_received / actual_base_sold if actual_base_sold > D0 else D0
+
+            return {
+                "direction": "sell",
+                "volume": actual_base_sold,
+                "avg_price": avg_price,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        return {
+            "direction": "none",
+            "volume": D0,
+            "avg_price": D0,
+            "pre_consensus_price": pre_consensus_price,
+        }
 
     def _amm_arbitrage_buy_from_orderbook(self, target_volume: Decimal) -> Decimal:
         """
@@ -646,7 +1238,7 @@ class TradingPair(EngineNode):
             self.amm_reserve_base += executed_volume
             self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
             # 套利后更新共识价格
-            self._update_consensus_price_after_match()
+            self.update_consensus_price()
 
         return remaining
 
@@ -709,7 +1301,7 @@ class TradingPair(EngineNode):
             self.amm_reserve_quote = max(D0, self.amm_reserve_quote + quote_earned)
             self.amm_k = self.amm_reserve_base * self.amm_reserve_quote
             # 套利后更新共识价格
-            self._update_consensus_price_after_match()
+            self.update_consensus_price()
 
         return remaining
 

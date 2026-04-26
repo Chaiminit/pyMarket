@@ -67,7 +67,7 @@ class BondTradingPair(EngineNode):
             token: 债券标的代币
             initial_rate: 初始市场利率（年化）
         """
-        super().__init__(token.name)
+        super().__init__(f"{token.token_id}/{initial_rate}")
         self.token = token
         self.current_rate = to_decimal(initial_rate)
         self.consensus_rate = self.current_rate  # 共识利率（买卖盘口平均利率）

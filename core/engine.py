@@ -39,7 +39,7 @@ class MarketEngine:
     来使用继承自基础类的自定义实现。
 
     Attributes:
-        tokens: 代币映射 {name: Token}
+        tokens: 代币映射 {id: Token}
         trading_pairs: 普通交易对列表
         bond_trading_pairs: 债券交易对列表
         traders: 交易者列表
@@ -91,8 +91,8 @@ class MarketEngine:
         self._trader_class = trader_class
         self._corp_class = corp_class
 
-        self.tokens: Dict[Token, str] = {}  # Token -> name 的映射
-        self._token_by_name: Dict[str, Token] = {}  # name -> Token 的映射（用于快速查找）
+        self.tokens: Dict[Token, str] = {}  # Token -> token_id 的映射
+        self._token_by_id: Dict[str, Token] = {}  # token_id -> Token 的映射（用于快速查找）
         self.trading_pairs: List[TradingPair] = []
         self.bond_trading_pairs: List[BondTradingPair] = []
         self.traders: List[Trader] = []
@@ -104,12 +104,12 @@ class MarketEngine:
 
     # ====== 代币管理 ======
 
-    def create_token(self, name: str, is_quote: bool = False, **kwargs) -> Token:
+    def create_token(self, token_id: str, is_quote: bool = False, **kwargs) -> Token:
         """
         创建新代币
 
         Args:
-            name: 代币名称
+            token_id: 代币ID
             is_quote: 是否为计价代币（全局只能有一个）
             **kwargs: 传递给 token_class 的额外参数
 
@@ -119,10 +119,9 @@ class MarketEngine:
         Raises:
             ValueError: 如果计价代币已存在
         """
-        token_id = len(self.tokens)
-        token = self._token_class(name, token_id, is_quote, **kwargs)
-        self.tokens[token] = name
-        self._token_by_name[name] = token
+        token = self._token_class(token_id, is_quote, **kwargs)
+        self.tokens[token] = token_id
+        self._token_by_id[token_id] = token
         self._nodes.add(token)
         token._engine = self
 
@@ -148,12 +147,11 @@ class MarketEngine:
         """
         if not isinstance(token, Token):
             raise TypeError(f"token 必须是 Token 或其子类的实例，收到 {type(token)}")
+        if token.token_id in self.tokens:
+            raise ValueError(f"代币 {token.token_id} 已存在")
 
-        if token.name in self._token_by_name:
-            raise ValueError(f"代币 {token.name} 已存在")
-
-        self.tokens[token] = token.name
-        self._token_by_name[token.name] = token
+        self.tokens[token] = token.token_id
+        self._token_by_id[token.token_id] = token
         self._nodes.add(token)
         token._engine = self
 
@@ -162,33 +160,34 @@ class MarketEngine:
                 raise ValueError(f"全局计价代币已存在: {self._quote_token}")
             self._quote_token = token
 
-    def get_token(self, name: str) -> Optional[Token]:
+    def get_token(self, token_id: str) -> Optional[Token]:
         """
-        通过名称获取代币
+        通过ID获取代币
 
         Args:
-            name: 代币名称
+            token_id: 代币ID
 
         Returns:
             Token实例或None
         """
-        return self._token_by_name.get(name)
+        return self._token_by_id.get(token_id)
 
-    def set_quote_token(self, name: str) -> None:
+    def set_quote_token(self, token_id: str) -> None:
         """
         设置计价代币
 
         Args:
-            name: 代币名称
+            token_id: 代币ID
 
         Raises:
             ValueError: 如果代币不存在或计价代币已设置
         """
-        if name not in self._token_by_name:
-            raise ValueError(f"代币 {name} 不存在")
+        if token_id not in self._token_by_id:
+            raise ValueError(f"代币 {token_id} 不存在")
+
         if self._quote_token is not None:
             raise ValueError(f"全局计价代币已存在: {self._quote_token}")
-        self._quote_token = self._token_by_name[name]
+        self._quote_token = self._token_by_id[token_id]
 
     def get_quote_token(self) -> Optional[Token]:
         """获取当前计价代币"""
@@ -198,8 +197,8 @@ class MarketEngine:
 
     def create_trading_pair(
         self,
-        base_token_name: str,
-        quote_token_name: str,
+        base_token_id: str,
+        quote_token_id: str,
         initial_price,
         **kwargs
     ) -> TradingPair:
@@ -207,8 +206,8 @@ class MarketEngine:
         创建普通交易对
 
         Args:
-            base_token_name: 基础代币名称
-            quote_token_name: 计价代币名称
+            base_token_id: 基础代币ID
+            quote_token_id: 计价代币ID
             initial_price: 初始价格
             **kwargs: 传递给 trading_pair_class 的额外参数
 
@@ -218,13 +217,13 @@ class MarketEngine:
         Raises:
             ValueError: 如果代币不存在
         """
-        base_token = self._token_by_name.get(base_token_name)
-        quote_token = self._token_by_name.get(quote_token_name)
+        base_token = self._token_by_id.get(base_token_id)
+        quote_token = self._token_by_id.get(quote_token_id)
 
         if base_token is None:
-            raise ValueError(f"基础代币 {base_token_name} 不存在")
+            raise ValueError(f"基础代币 {base_token_id} 不存在")
         if quote_token is None:
-            raise ValueError(f"计价代币 {quote_token_name} 不存在")
+            raise ValueError(f"计价代币 {quote_token_id} 不存在")
 
         pair = self._trading_pair_class(base_token, quote_token, initial_price, **kwargs)
         self.trading_pairs.append(pair)
@@ -254,7 +253,7 @@ class MarketEngine:
 
     def create_bond_trading_pair(
         self,
-        token_name: str,
+        token_id: str,
         initial_rate,
         **kwargs
     ) -> BondTradingPair:
@@ -262,7 +261,7 @@ class MarketEngine:
         创建债券交易对
 
         Args:
-            token_name: 标的代币名称
+            token_id: 标的代币ID
             initial_rate: 初始利率（年化）
             **kwargs: 传递给 bond_trading_pair_class 的额外参数
 
@@ -272,9 +271,9 @@ class MarketEngine:
         Raises:
             ValueError: 如果代币不存在
         """
-        token = self._token_by_name.get(token_name)
+        token = self._token_by_id.get(token_id)
         if token is None:
-            raise ValueError(f"代币 {token_name} 不存在")
+            raise ValueError(f"代币 {token_id} 不存在")
 
         bond_pair = self._bond_trading_pair_class(token, initial_rate, **kwargs)
         self.bond_trading_pairs.append(bond_pair)
@@ -392,9 +391,9 @@ class MarketEngine:
         corp._engine = self
 
         # 注册股份代币到引擎
-        share_token_name = f"{name}_SHARE"
-        self.tokens[corp.share_token] = share_token_name
-        self._token_by_name[share_token_name] = corp.share_token
+        share_token_id = f"{token_id}_SHARE"
+        self.tokens[corp.share_token] = share_token_id
+        self._token_by_id[share_token_id] = corp.share_token
 
         # 设置价格转换器
         if self._quote_token:
@@ -422,9 +421,9 @@ class MarketEngine:
         corp._engine = self
 
         # 注册股份代币到引擎
-        share_token_name = f"{corp.name}_SHARE"
-        self.tokens[corp.share_token] = share_token_name
-        self._token_by_name[share_token_name] = corp.share_token
+        share_token_id = f"{corp.token_id}_SHARE"
+        self.tokens[corp.share_token] = share_token_id
+        self._token_by_id[share_token_id] = corp.share_token
 
         # 设置价格转换器
         if self._quote_token:
@@ -512,7 +511,7 @@ class MarketEngine:
             try:
                 node.step(dt)
             except Exception as e:
-                print(f"警告: 引擎节点 {node.name} 的 step 回调失败: {e}")
+                print(f"警告: 引擎节点 {node.__repr__()} 的 step 回调失败: {e}")
 
         # 结算债券利息（使用秒为单位）
         if self.traders and self.bond_trading_pairs:

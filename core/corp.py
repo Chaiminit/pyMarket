@@ -88,7 +88,6 @@ class Corp(Trader, EngineNode):
 
         # 创建股份代币
         self.share_token = Token(
-            name=f"{name}_SHARE",
             token_id=token_id,
             is_quote=False
         )
@@ -250,8 +249,8 @@ class Corp(Trader, EngineNode):
         if company_balance < total_amount:
             raise ValueError(
                 f"公司 {self.name} 资产不足: "
-                f"需要 {total_amount} {dividend_token.name}, "
-                f"但仅有 {company_balance} {dividend_token.name}"
+                f"需要 {total_amount} {dividend_token.token_id}, "
+                f"但仅有 {company_balance} {dividend_token.token_id}"
             )
 
         # 获取流通中的股份总数
