@@ -41,6 +41,7 @@ from .trader import Trader
 from .token import Token
 from .order import Order, BondOrder
 from .corp import Corp
+from .rmm import ReflexiveMarketMaker
 from .liquidation import LiquidationEngine, LiquidationResult
 from .utils import to_decimal, d, D0, D1
 
@@ -62,6 +63,8 @@ __all__ = [
     # 清算
     "LiquidationEngine",
     "LiquidationResult",
+    # 做市商
+    "ReflexiveMarketMaker",
     # 工具函数
     "to_decimal",
     "d",

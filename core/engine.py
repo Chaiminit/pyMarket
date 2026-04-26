@@ -24,6 +24,7 @@ from .trader import Trader
 from .token import Token
 from .liquidation import LiquidationEngine, LiquidationResult
 from .corp import Corp
+from .rmm import ReflexiveMarketMaker
 from .utils import to_decimal, D0
 from .engine_node import EngineNode
 
@@ -101,6 +102,11 @@ class MarketEngine:
         self._last_step_time: Optional[float] = None  # 上次调用 step 的时间戳
         self._liquidation_engine = LiquidationEngine(self)
         self._nodes: Set[EngineNode] = set()  # 所有引擎节点（自动注册）
+
+        # 反射性做市商（全局唯一，所有交易对共用）
+        self.rmm = ReflexiveMarketMaker()
+        self._nodes.add(self.rmm)
+        self.rmm._engine = self
 
     # ====== 代币管理 ======
 
@@ -229,6 +235,7 @@ class MarketEngine:
         self.trading_pairs.append(pair)
         self._nodes.add(pair)
         pair._engine = self
+        self.rmm.register_pair(pair)
         return pair
 
     def register_trading_pair(self, pair: TradingPair) -> None:
@@ -248,6 +255,7 @@ class MarketEngine:
         self.trading_pairs.append(pair)
         self._nodes.add(pair)
         pair._engine = self
+        self.rmm.register_pair(pair)
 
     # ====== 债券交易对 ======
 
