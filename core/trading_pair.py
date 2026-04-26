@@ -88,6 +88,12 @@ class TradingPair(EngineNode):
         self.fee_calculator = FeeCalculator(self.fee_config)
         self.fee_collector = FeeCollector(self.fee_config.fee_recipient)
 
+        # AMM 恒定乘积做市商系统
+        self.amm_enabled = False
+        self.amm_reserve_base = D0  # base_token 储备
+        self.amm_reserve_quote = D0  # quote_token 储备
+        self.amm_k = D0  # 恒定乘积 k = reserve_base * reserve_quote
+
     def set_fee_config(self, fee_config: FeeConfig) -> None:
         """
         设置手续费配置
@@ -119,6 +125,72 @@ class TradingPair(EngineNode):
             指定代币的手续费金额，或所有代币的手续费字典
         """
         return self.fee_collector.get_collected(token)
+
+    def enable_amm(
+        self,
+        base_amount,
+        quote_amount,
+    ) -> None:
+        """
+        启用恒定乘积做市商模型（AMM）
+
+        AMM 池作为最后的做市商，在市场流动性枯竭时提供流动性。
+        储备比例必须等于当前价格，即 reserve_quote / reserve_base = price
+
+        Args:
+            base_amount: base_token 的储备量
+            quote_amount: quote_token 的储备量
+
+        Raises:
+            ValueError: 如果储备比例不等于当前价格
+        """
+        base_amount = to_decimal(base_amount)
+        quote_amount = to_decimal(quote_amount)
+
+        if base_amount <= D0 or quote_amount <= D0:
+            raise ValueError("储备量必须大于0")
+
+        # 检查储备比例是否等于当前价格
+        implied_price = quote_amount / base_amount
+        if implied_price != self.price:
+            raise ValueError(
+                f"储备比例必须等于当前价格: "
+                f"储备比例={implied_price}, 当前价格={self.price}"
+            )
+
+        self.amm_enabled = True
+        self.amm_reserve_base = base_amount
+        self.amm_reserve_quote = quote_amount
+        self.amm_k = base_amount * quote_amount
+
+    def disable_amm(self) -> None:
+        """
+        禁用 AMM 做市商模型
+        """
+        self.amm_enabled = False
+        self.amm_reserve_base = D0
+        self.amm_reserve_quote = D0
+        self.amm_k = D0
+
+    def get_amm_reserves(self) -> Tuple[Decimal, Decimal]:
+        """
+        获取 AMM 池储备
+
+        Returns:
+            (base_token 储备, quote_token 储备)
+        """
+        return self.amm_reserve_base, self.amm_reserve_quote
+
+    def get_amm_price(self) -> Decimal:
+        """
+        获取 AMM 池的隐含价格
+
+        Returns:
+            AMM 池的隐含价格（quote/base），如果 AMM 未启用返回 0
+        """
+        if not self.amm_enabled or self.amm_reserve_base == D0:
+            return D0
+        return self.amm_reserve_quote / self.amm_reserve_base
 
     def submit_limit_order(
         self, trader: Trader, direction: str, price, volume, frozen_amount
@@ -365,6 +437,15 @@ class TradingPair(EngineNode):
                             buyer.orders.remove(buy_order)
                         self.buy_orders.remove(buy_order)
 
+            # 如果订单簿深度不足且 AMM 已启用，使用 AMM 池完成剩余订单
+            if volume > D0 and self.amm_enabled:
+                amm_volume, amm_trade_details, amm_fee = self._execute_amm_market_order(
+                    trader, direction, volume
+                )
+                executed_volume += amm_volume
+                trade_details.extend(amm_trade_details)
+                total_fee += amm_fee
+
             return executed_volume, trade_details, total_fee
 
     def _match_orders(self) -> None:
@@ -532,6 +613,9 @@ class TradingPair(EngineNode):
         每个模拟步进时由 Engine 调用，子类可以重写此方法
         来实现自定义的每步逻辑（如价格更新、订单检查等）。
 
+        如果 AMM 已启用，此方法会自动执行套利逻辑，
+        使 AMM 池的隐含价格向市场价格收敛。
+
         Args:
             dt: 时间步长（秒）
 
@@ -541,4 +625,333 @@ class TradingPair(EngineNode):
             ...         # 每步更新价格
             ...         self.update_price()
         """
-        pass
+        if self.amm_enabled:
+            self._amm_arbitrage(dt)
+
+    def _amm_arbitrage(self, dt: Decimal) -> None:
+        """
+        AMM 套利逻辑
+
+        当市场价格与 AMM 池隐含价格不一致时，通过模拟套利交易
+        使池子储备调整，直到隐含价格等于市场价格。
+
+        套利方向：
+        - 如果市场价格 > AMM 价格：套利者买入 base_token，
+          池子 base 减少，quote 增加，AMM 价格上升
+        - 如果市场价格 < AMM 价格：套利者卖出 base_token，
+          池子 base 增加，quote 减少，AMM 价格下降
+
+        Args:
+            dt: 时间步长（秒），用于控制套利速度
+        """
+        if self.amm_reserve_base <= D0 or self.amm_reserve_quote <= D0:
+            return
+
+        amm_price = self.get_amm_price()
+        market_price = self.price
+
+        # 计算价格差异
+        price_diff = market_price - amm_price
+
+        # 如果价格差异很小，不需要套利
+        if abs(price_diff) < D0:
+            return
+
+        # 套利速度参数（可根据需要调整）
+        arbitrage_speed = to_decimal("0.01") * dt
+
+        if price_diff > D0:
+            # 市场价格 > AMM 价格，需要买入 base_token 提高 AMM 价格
+            # 计算需要买入的 base_token 数量
+            # 使用恒定乘积公式：k = reserve_base * reserve_quote
+            # 买入 Δbase 后：new_base = reserve_base - Δbase
+            #                 new_quote = k / new_base
+            # 目标：new_quote / new_base = market_price
+            
+            # 解方程：k / (reserve_base - Δbase)² = market_price
+            # 得到：Δbase = reserve_base - sqrt(k / market_price)
+            target_base = (self.amm_k / market_price).sqrt()
+            delta_base = self.amm_reserve_base - target_base
+            
+            # 限制套利量，避免过度调整
+            max_delta = self.amm_reserve_base * arbitrage_speed
+            delta_base = min(delta_base, max_delta)
+            
+            if delta_base > D0:
+                self._amm_swap_base_for_quote(delta_base)
+        else:
+            # 市场价格 < AMM 价格，需要卖出 base_token 降低 AMM 价格
+            # 卖出 Δbase 后：new_base = reserve_base + Δbase
+            #              new_quote = k / new_base
+            # 目标：new_quote / new_base = market_price
+            
+            # 解方程：k / (reserve_base + Δbase)² = market_price
+            # 得到：Δbase = sqrt(k / market_price) - reserve_base
+            target_base = (self.amm_k / market_price).sqrt()
+            delta_base = target_base - self.amm_reserve_base
+            
+            # 限制套利量
+            max_delta = self.amm_reserve_base * arbitrage_speed
+            delta_base = min(delta_base, max_delta)
+            
+            if delta_base > D0:
+                self._amm_swap_quote_for_base(delta_base * amm_price)
+
+    def _amm_swap_base_for_quote(self, base_amount: Decimal) -> Decimal:
+        """
+        AMM 池：用 quote_token 购买 base_token
+
+        根据恒定乘积公式计算需要支付的 quote_token 数量。
+
+        Args:
+            base_amount: 要购买的 base_token 数量
+
+        Returns:
+            需要支付的 quote_token 数量
+        """
+        if base_amount <= D0 or base_amount >= self.amm_reserve_base:
+            return D0
+
+        # 恒定乘积公式：k = reserve_base * reserve_quote
+        # 购买后：new_base = reserve_base - base_amount
+        #       new_quote = k / new_base
+        # 需要支付的 quote = new_quote - reserve_quote
+        
+        new_reserve_base = self.amm_reserve_base - base_amount
+        new_reserve_quote = self.amm_k / new_reserve_base
+        quote_amount = new_reserve_quote - self.amm_reserve_quote
+
+        # 更新储备
+        self.amm_reserve_base = new_reserve_base
+        self.amm_reserve_quote = new_reserve_quote
+
+        # 更新市场价格为 AMM 隐含价格
+        self.price = self.get_amm_price()
+
+        return quote_amount
+
+    def _amm_swap_quote_for_base(self, quote_amount: Decimal) -> Decimal:
+        """
+        AMM 池：用 base_token 购买 quote_token
+
+        根据恒定乘积公式计算可以获得的 base_token 数量。
+
+        Args:
+            quote_amount: 要支付的 quote_token 数量
+
+        Returns:
+            可以获得的 base_token 数量
+        """
+        if quote_amount <= D0:
+            return D0
+
+        # 恒定乘积公式：k = reserve_base * reserve_quote
+        # 支付后：new_quote = reserve_quote + quote_amount
+        #       new_base = k / new_quote
+        # 可以获得的 base = reserve_base - new_base
+        
+        new_reserve_quote = self.amm_reserve_quote + quote_amount
+        new_reserve_base = self.amm_k / new_reserve_quote
+        base_amount = self.amm_reserve_base - new_reserve_base
+
+        # 更新储备
+        self.amm_reserve_base = new_reserve_base
+        self.amm_reserve_quote = new_reserve_quote
+
+        # 更新市场价格为 AMM 隐含价格
+        self.price = self.get_amm_price()
+
+        return base_amount
+
+    def _execute_amm_market_order(
+        self, trader: Trader, direction: str, volume: Decimal
+    ) -> Tuple[Decimal, List[Dict], Decimal]:
+        """
+        使用 AMM 池执行市价单
+
+        当订单簿深度不足时，使用 AMM 池作为最后的做市商。
+        通过微积分方法连续根据当前储备调整做市成交价，
+        使得市价订单的冻结量被消耗光，而不是满足其预期成交量。
+
+        恒定乘积做市商模型：
+        - k = reserve_base * reserve_quote (恒定)
+        - 价格 = reserve_quote / reserve_base
+        - 买入 base_token：支付 quote_token，reserve_base 减少，reserve_quote 增加
+        - 卖出 base_token：获得 quote_token，reserve_base 增加，reserve_quote 减少
+
+        积分定价方法：
+        当购买 Δbase 时，支付的 quote 为积分：
+        ∫(k / (R_base - x)²)dx from 0 to Δbase
+        = k * (1/(R_base - Δbase) - 1/R_base)
+
+        Args:
+            trader: 下单交易者
+            direction: 'buy' 或 'sell'
+            volume: 剩余未成交的成交量
+
+        Returns:
+            (实际成交量, 成交明细列表, 总手续费)
+        """
+        if not self.amm_enabled or volume <= D0:
+            return D0, [], D0
+
+        trade_details = []
+        total_fee = D0
+        executed_volume = D0
+
+        if direction == "buy":
+            # 买入 base_token，支付 quote_token
+            available_quote = trader.assets.get(self.quote_token, D0)
+            
+            if available_quote <= D0:
+                return D0, [], D0
+
+            # 使用积分公式计算可以购买的 base_token 数量
+            # 支付 quote_amount 后，可以获得的 base = R_base - k/(R_quote + quote_amount)
+            # 但需要考虑手续费
+            
+            # 计算最大可购买的 base_token（不考虑手续费）
+            # 从积分公式：quote_amount = k * (1/(R_base - Δbase) - 1/R_base)
+            # 解得：Δbase = R_base - k/(R_quote + quote_amount)
+            
+            # 先计算手续费
+            fee_rate = self.fee_config.taker_rate if self.fee_config else D0
+            available_for_swap = available_quote / (D1 + fee_rate) if fee_rate > D0 else available_quote
+            
+            # 计算可以购买的 base_token 数量
+            max_base = self.amm_reserve_base - self.amm_k / (self.amm_reserve_quote + available_for_swap)
+            
+            # 限制购买量不超过储备的 95%（防止储备耗尽）
+            max_base = min(max_base, self.amm_reserve_base * to_decimal("0.95"))
+            
+            if max_base <= D0:
+                return D0, [], D0
+
+            # 使用积分公式计算实际支付的 quote
+            # quote_needed = k * (1/(R_base - Δbase) - 1/R_base)
+            new_reserve_base = self.amm_reserve_base - max_base
+            new_reserve_quote = self.amm_k / new_reserve_base
+            quote_needed = new_reserve_quote - self.amm_reserve_quote
+            
+            # 计算手续费
+            fee = self.fee_calculator.calculate(quote_needed, is_taker=True, is_buyer=True, trader=trader)
+            total_cost = quote_needed + fee
+            
+            # 检查余额是否足够
+            if total_cost > available_quote:
+                # 重新计算可购买量
+                available_for_swap = available_quote - fee
+                # 从积分公式反推
+                new_reserve_quote = self.amm_reserve_quote + available_for_swap
+                new_reserve_base = self.amm_k / new_reserve_quote
+                max_base = self.amm_reserve_base - new_reserve_base
+                
+                if max_base <= D0:
+                    return D0, [], D0
+                
+                quote_needed = available_for_swap
+                fee = self.fee_calculator.calculate(quote_needed, is_taker=True, is_buyer=True, trader=trader)
+                total_cost = quote_needed + fee
+            
+            # 执行交易
+            trader.assets[self.quote_token] = trader.assets.get(self.quote_token, D0) - total_cost
+            trader.assets[self.base_token] = trader.assets.get(self.base_token, D0) + max_base
+            
+            # 更新 AMM 储备
+            self.amm_reserve_base = self.amm_reserve_base - max_base
+            self.amm_reserve_quote = self.amm_reserve_quote + quote_needed
+            
+            # 更新市场价格
+            self.price = self.get_amm_price()
+            
+            # 收取手续费
+            self.fee_collector.collect(self.quote_token, fee, {
+                "trader": trader.name,
+                "direction": "buy",
+                "is_taker": True,
+                "volume": max_base,
+                "price": self.price,
+                "source": "AMM"
+            })
+            
+            # 记录成交
+            self.log.append((time.time(), self.price, max_base, fee, D0))
+            
+            trade_details.append({
+                "price": self.price,
+                "volume": max_base,
+                "cost": quote_needed,
+                "buyer_fee": fee,
+                "seller_fee": D0,
+                "counterparty": "AMM",
+            })
+            
+            executed_volume = max_base
+            total_fee = fee
+
+        else:  # sell
+            # 卖出 base_token，获得 quote_token
+            available_base = trader.assets.get(self.base_token, D0)
+            
+            if available_base <= D0:
+                return D0, [], D0
+
+            # 限制卖出量不超过储备的 95%
+            max_sell = min(available_base, self.amm_reserve_base * to_decimal("0.95"))
+            
+            if max_sell <= D0:
+                return D0, [], D0
+
+            # 使用积分公式计算可以获得的 quote_token
+            # 卖出 Δbase 后：new_base = R_base + Δbase
+            #              new_quote = k / new_base
+            # 获得的 quote = R_quote - new_quote
+            
+            new_reserve_base = self.amm_reserve_base + max_sell
+            new_reserve_quote = self.amm_k / new_reserve_base
+            quote_received = self.amm_reserve_quote - new_reserve_quote
+            
+            if quote_received <= D0:
+                return D0, [], D0
+
+            # 计算手续费
+            fee = self.fee_calculator.calculate(quote_received, is_taker=True, is_buyer=False, trader=trader)
+            net_revenue = quote_received - fee
+            
+            # 执行交易
+            trader.assets[self.base_token] = available_base - max_sell
+            trader.assets[self.quote_token] = trader.assets.get(self.quote_token, D0) + net_revenue
+            
+            # 更新 AMM 储备
+            self.amm_reserve_base = self.amm_reserve_base + max_sell
+            self.amm_reserve_quote = self.amm_reserve_quote - quote_received
+            
+            # 更新市场价格
+            self.price = self.get_amm_price()
+            
+            # 收取手续费
+            self.fee_collector.collect(self.quote_token, fee, {
+                "trader": trader.name,
+                "direction": "sell",
+                "is_taker": True,
+                "volume": max_sell,
+                "price": self.price,
+                "source": "AMM"
+            })
+            
+            # 记录成交
+            self.log.append((time.time(), self.price, max_sell, fee, D0))
+            
+            trade_details.append({
+                "price": self.price,
+                "volume": max_sell,
+                "revenue": quote_received,
+                "buyer_fee": D0,
+                "seller_fee": fee,
+                "counterparty": "AMM",
+            })
+            
+            executed_volume = max_sell
+            total_fee = fee
+
+        return executed_volume, trade_details, total_fee
