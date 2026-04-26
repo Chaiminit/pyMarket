@@ -653,6 +653,33 @@ class MarketEngine:
 
         return total_fees
 
+    def run(self, fps: float = 60.0) -> None:
+        """
+        运行引擎，阻塞当前线程
+
+        以指定的帧率循环执行市场模拟步骤，直到被外部中断
+
+        Args:
+            fps: 帧率，每秒执行的步骤数
+        """
+        frame_duration = 1.0 / fps  # 每帧持续时间（秒）
+        
+        try:
+            while True:
+                start_time = time.time()
+                self.step()
+                end_time = time.time()
+                
+                # 计算实际执行时间并睡眠剩余时间
+                execution_time = end_time - start_time
+                sleep_time = frame_duration - execution_time
+                
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        except KeyboardInterrupt:
+            # 捕获 Ctrl+C 中断
+            print("引擎运行被用户中断")
+
 # 全局引擎实例（单例模式）
 _engine_instance: Optional[MarketEngine] = None
 
