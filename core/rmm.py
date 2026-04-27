@@ -54,14 +54,14 @@ class ReflexiveMarketMaker(EngineNode):
     def __init__(
         self,
         min_fee_rate="0.00001",
-        max_fee_rate="0.1",
+        max_fee_rate="0.001",
     ):
         """
         创建反射性做市商
 
         Args:
             min_fee_rate: 最小手续费比例（默认 0.001%）
-            max_fee_rate: 最大手续费比例（默认 10%）
+            max_fee_rate: 最大手续费比例（默认 0.1%）
         """
         super().__init__("RMM")
         self.min_fee_rate = to_decimal(min_fee_rate)
