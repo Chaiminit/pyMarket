@@ -283,20 +283,16 @@ class ReflexiveMarketMaker(EngineNode):
             remaining_to_buy -= match_volume
 
             if sell_order.remaining_volume <= D0:
-                sell_order.close()
                 if sell_order in seller.orders:
                     seller.orders.remove(sell_order)
                 pair.sell_orders.remove(sell_order)
 
         if actual_base_bought > D0:
-            # 关键修复：套利交易时，RMM 池用 quote_token 购买 base_token
-            # 池子的 quote 储备减少 total_quote_paid（支付给卖家）
-            # 池子的 base 储备增加 actual_base_bought（从卖家购买）
-            # 这会导致 k 值变化，但这是正确的，因为套利是外部交易
-            pool.reserve_quote -= total_quote_paid
+            # RMM 套利：RMM 池用 USDT 购买 base_token（外部交易，会改变 k 值）
+            # 资金流向：RMM 池 USDT → 卖家，卖家 base_token → RMM 池
             pool.reserve_base += actual_base_bought
-            # 重新计算 k 值
-            pool.k = pool.reserve_base * pool.reserve_quote
+            pool.reserve_quote -= total_quote_paid
+            pool.k = pool.reserve_base * pool.reserve_quote  # k 值改变
 
             pair.price = self.get_price(pair)
             pair.update_consensus_price()
@@ -383,20 +379,16 @@ class ReflexiveMarketMaker(EngineNode):
             remaining_to_sell -= match_volume
 
             if buy_order.remaining_volume <= D0:
-                buy_order.close()
                 if buy_order in buyer.orders:
                     buyer.orders.remove(buy_order)
                 pair.buy_orders.remove(buy_order)
 
         if actual_base_sold > D0:
-            # 关键修复：套利交易时，RMM 池卖出 base_token 换取 quote_token
-            # 池子的 base 储备减少 actual_base_sold（卖给买家）
-            # 池子的 quote 储备增加 total_quote_received（从买家获得）
-            # 这会导致 k 值变化，但这是正确的，因为套利是外部交易
+            # RMM 套利：RMM 池卖出 base_token 换取 USDT（外部交易，会改变 k 值）
+            # 资金流向：RMM 池 base_token → 买家，买家 USDT(冻结) → RMM 池
             pool.reserve_base -= actual_base_sold
             pool.reserve_quote += total_quote_received
-            # 重新计算 k 值
-            pool.k = pool.reserve_base * pool.reserve_quote
+            pool.k = pool.reserve_base * pool.reserve_quote  # k 值改变
 
             pair.price = self.get_price(pair)
             pair.update_consensus_price()
@@ -450,21 +442,31 @@ class ReflexiveMarketMaker(EngineNode):
         executed_volume = D0
 
         if direction == "buy":
-            available_quote = trader.assets.get(pair.quote_token, D0)
-
-            if available_quote <= D0:
-                return D0, [], D0
-
-            max_base = pool.reserve_base - pool.k / (pool.reserve_quote + available_quote)
-
-            max_base = min(max_base, pool.reserve_base * to_decimal("0.95"))
-
+            # 使用传入的 volume 计算需要的 quote，而不是用交易者的全部资产
+            # volume 是目标 base_token 数量
+            max_base = min(volume, pool.reserve_base * to_decimal("0.95"))
+            
             if max_base <= D0:
                 return D0, [], D0
-
+            
+            # 计算购买 max_base 需要多少 quote
             new_reserve_base = pool.reserve_base - max_base
             new_reserve_quote = pool.k / new_reserve_base
             quote_needed = new_reserve_quote - pool.reserve_quote
+            
+            # 检查交易者是否有足够的 quote
+            available_quote = trader.assets.get(pair.quote_token, D0)
+            if available_quote < quote_needed:
+                # 如果资金不足，重新计算能买多少
+                if available_quote <= D0:
+                    return D0, [], D0
+                # 根据可用 quote 反推能买多少 base
+                new_reserve_quote = pool.reserve_quote + available_quote
+                new_reserve_base = pool.k / new_reserve_quote
+                max_base = pool.reserve_base - new_reserve_base
+                if max_base <= D0:
+                    return D0, [], D0
+                quote_needed = available_quote
 
             trader.assets[pair.quote_token] = trader.assets.get(pair.quote_token, D0) - quote_needed
             trader.assets[pair.base_token] = trader.assets.get(pair.base_token, D0) + max_base
@@ -489,16 +491,21 @@ class ReflexiveMarketMaker(EngineNode):
             executed_volume = max_base
 
         else:  # sell
-            available_base = trader.assets.get(pair.base_token, D0)
-
-            if available_base <= D0:
-                return D0, [], D0
-
-            max_sell = min(available_base, pool.reserve_base * to_decimal("0.95"))
-
+            # 使用传入的 volume，而不是交易者的全部资产
+            max_sell = min(volume, pool.reserve_base * to_decimal("0.95"))
+            
             if max_sell <= D0:
                 return D0, [], D0
+            
+            # 检查交易者是否有足够的 base
+            available_base = trader.assets.get(pair.base_token, D0)
+            if available_base < max_sell:
+                if available_base <= D0:
+                    return D0, [], D0
+                max_sell = available_base
+                max_sell = min(max_sell, pool.reserve_base * to_decimal("0.95"))
 
+            # 计算卖出 max_sell 能获得多少 quote
             new_reserve_base = pool.reserve_base + max_sell
             new_reserve_quote = pool.k / new_reserve_base
             quote_received = pool.reserve_quote - new_reserve_quote
@@ -588,11 +595,20 @@ class ReflexiveMarketMaker(EngineNode):
         if current_consensus_price <= D0:
             return
 
-        total_fee_base = total_fee_quote / current_consensus_price
+        # 按 AMM 内部价格计算手续费分配
+        # 总手续费价值 = total_fee_quote (以 USDT 计价)
+        # 按当前储备比例分配：base_fee / quote_fee = reserve_base / reserve_quote
+        amm_price = self.get_price(pair)
+        if amm_price <= D0:
+            return
+        
+        # 手续费按 50/50 由买卖双方分担，但按 AMM 价格换算
+        # 买家付 base_token，卖家付 quote_token
+        fee_value_each = total_fee_quote / to_decimal("2")  # 每人承担一半价值
+        buyer_fee_base = fee_value_each / amm_price  # 买家付 ETH
+        seller_fee_quote = fee_value_each  # 卖家付 USDT
 
-        buyer_fee_base = total_fee_base / to_decimal("2")
-        seller_fee_quote = total_fee_quote / to_decimal("2")
-
+        # 从买家扣除 base_token
         buyer_current_base = buyer.assets.get(pair.base_token, D0)
         if buyer_current_base >= buyer_fee_base:
             buyer.assets[pair.base_token] = buyer_current_base - buyer_fee_base
@@ -600,6 +616,7 @@ class ReflexiveMarketMaker(EngineNode):
             buyer_fee_base = buyer_current_base
             buyer.assets[pair.base_token] = D0
 
+        # 从卖家扣除 quote_token
         seller_current_quote = seller.assets.get(pair.quote_token, D0)
         if seller_current_quote >= seller_fee_quote:
             seller.assets[pair.quote_token] = seller_current_quote - seller_fee_quote
@@ -607,6 +624,7 @@ class ReflexiveMarketMaker(EngineNode):
             seller_fee_quote = seller_current_quote
             seller.assets[pair.quote_token] = D0
 
+        # RMM 池获得手续费
         if buyer_fee_base > D0:
             pool.reserve_base += buyer_fee_base
         if seller_fee_quote > D0:
@@ -685,54 +703,70 @@ class ReflexiveMarketMaker(EngineNode):
         if total_participants_volume <= D0:
             return
 
+        # 按 AMM 内部价格计算手续费分配
+        amm_price = self.get_price(pair)
+        if amm_price <= D0:
+            return
+        
+        # 手续费按成交比例分配给 taker 和 makers
         taker_share = taker_volume / total_participants_volume
-        taker_fee_base = total_fee_base * taker_share
-        taker_fee_quote = total_fee_quote * taker_share
 
+        # 买入方向：taker 付 base，makers 付 quote
+        # 卖出方向：taker 付 quote，makers 付 base
         if direction == "buy":
+            # Taker (买家) 付 base_token
+            taker_fee_value = total_fee_quote * taker_share / to_decimal("2")
+            taker_fee_base = taker_fee_value / amm_price
+            
             taker_current_base = taker.assets.get(pair.base_token, D0)
             if taker_current_base >= taker_fee_base:
                 taker.assets[pair.base_token] = taker_current_base - taker_fee_base
             else:
                 taker_fee_base = taker_current_base
                 taker.assets[pair.base_token] = D0
-        else:
-            taker_current_quote = taker.assets.get(pair.quote_token, D0)
-            if taker_current_quote >= taker_fee_quote:
-                taker.assets[pair.quote_token] = taker_current_quote - taker_fee_quote
-            else:
-                taker_fee_quote = taker_current_quote
-                taker.assets[pair.quote_token] = D0
-
-        if taker_fee_base > D0:
-            pool.reserve_base += taker_fee_base
-        if taker_fee_quote > D0:
-            pool.reserve_quote += taker_fee_quote
-
-        for counterparty, cp_volume in counterparties:
-            cp_share = cp_volume / total_participants_volume
-            cp_fee_base = total_fee_base * cp_share
-            cp_fee_quote = total_fee_quote * cp_share
-
-            if direction == "buy":
+            
+            if taker_fee_base > D0:
+                pool.reserve_base += taker_fee_base
+            
+            # Makers (卖家) 付 quote_token
+            for counterparty, cp_volume in counterparties:
+                cp_share = cp_volume / total_participants_volume
+                cp_fee_value = total_fee_quote * cp_share / to_decimal("2")
+                
                 cp_current_quote = counterparty.assets.get(pair.quote_token, D0)
-                if cp_current_quote >= cp_fee_quote:
-                    counterparty.assets[pair.quote_token] = cp_current_quote - cp_fee_quote
+                if cp_current_quote >= cp_fee_value:
+                    counterparty.assets[pair.quote_token] = cp_current_quote - cp_fee_value
+                    pool.reserve_quote += cp_fee_value
                 else:
-                    cp_fee_quote = cp_current_quote
+                    pool.reserve_quote += cp_current_quote
                     counterparty.assets[pair.quote_token] = D0
+        else:
+            # Taker (卖家) 付 quote_token
+            taker_fee_value = total_fee_quote * taker_share / to_decimal("2")
+            
+            taker_current_quote = taker.assets.get(pair.quote_token, D0)
+            if taker_current_quote >= taker_fee_value:
+                taker.assets[pair.quote_token] = taker_current_quote - taker_fee_value
             else:
+                taker_fee_value = taker_current_quote
+                taker.assets[pair.quote_token] = D0
+            
+            if taker_fee_value > D0:
+                pool.reserve_quote += taker_fee_value
+            
+            # Makers (买家) 付 base_token
+            for counterparty, cp_volume in counterparties:
+                cp_share = cp_volume / total_participants_volume
+                cp_fee_value = total_fee_quote * cp_share / to_decimal("2")
+                cp_fee_base = cp_fee_value / amm_price
+                
                 cp_current_base = counterparty.assets.get(pair.base_token, D0)
                 if cp_current_base >= cp_fee_base:
                     counterparty.assets[pair.base_token] = cp_current_base - cp_fee_base
+                    pool.reserve_base += cp_fee_base
                 else:
-                    cp_fee_base = cp_current_base
+                    pool.reserve_base += cp_current_base
                     counterparty.assets[pair.base_token] = D0
-
-            if cp_fee_base > D0:
-                pool.reserve_base += cp_fee_base
-            if cp_fee_quote > D0:
-                pool.reserve_quote += cp_fee_quote
 
         pool.k = pool.reserve_base * pool.reserve_quote
 
