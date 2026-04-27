@@ -310,11 +310,20 @@ class TradingPair(EngineNode):
                 trade_details.extend(amm_trade_details)
                 total_fee += amm_fee
 
+            # 计算市价单的成交均价
+            avg_market_price = (
+                total_cost_or_revenue / executed_volume if executed_volume > D0 else D0
+            )
+
             # 市价单执行完成后，根据最新共识价格执行RMM套利
             if self.rmm:
                 arbitrage_result = self.rmm.arbitrage_after_match(self)
 
-                if executed_volume > D0 and arbitrage_result.get("direction") != "none":
+                # 只要有成交就收取滑点补偿费（冷启动时池子为空也会收取最小手续费）
+                if executed_volume > D0:
+                    # 使用市价单成交均价作为 avg_price 传入（冷启动时使用）
+                    if arbitrage_result.get("avg_price", D0) <= D0 and avg_market_price > D0:
+                        arbitrage_result["avg_price"] = avg_market_price
                     self.rmm.charge_slippage_compensation_market_order(
                         self, trader, counterparties, executed_volume, direction, arbitrage_result
                     )
@@ -354,16 +363,7 @@ class TradingPair(EngineNode):
                 best_buy.close(force=True)
                 continue
 
-            seller_base = seller.assets.get(self.base_token, D0)
-            if seller_base < match_volume:
-                if seller_base <= D0:
-                    best_sell.close(force=True)
-                    continue
-                else:
-                    match_volume = seller_base
-                    match_amount = match_volume * match_price
-                    total_buyer_cost = match_amount
-                    seller_revenue = match_amount
+            # 卖单的 base_token 在提交时已扣除并冻结，无需再次检查
 
             frozen_price = best_buy.price
             actual_cost = match_amount
@@ -373,7 +373,7 @@ class TradingPair(EngineNode):
                 buyer.assets.get(self.base_token, D0) + match_volume
             )
 
-            seller.assets[self.base_token] = seller_base - match_volume
+            # 卖单的 base_token 在提交时已扣除并冻结，这里只需将成交的 quote_token 给卖家
             seller.assets[self.quote_token] = (
                 seller.assets.get(self.quote_token, D0) + seller_revenue
             )

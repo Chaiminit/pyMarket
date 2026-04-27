@@ -389,11 +389,8 @@ class LiquidationEngine:
 
     def _clear_trader(self, trader: "Trader") -> None:
         """清空交易者的所有持仓"""
-        # 清空资产
+        # 清空资产（包括债券）
         trader.assets.clear()
-
-        # 清空债券
-        trader.bonds.clear()
 
         # 清空订单列表
         trader.orders.clear()

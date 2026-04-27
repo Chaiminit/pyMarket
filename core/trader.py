@@ -26,23 +26,24 @@ class Trader(EngineNode):
     """
     交易者类 - 金融市场参与者
 
-    交易者持有资产和债券，可以提交订单参与市场交易。
+    交易者持有资产（包括债券），可以提交订单参与市场交易。
     债券系统允许交易者进行借贷：正债券为借出（收利息），
     负债券为借入（付利息）。
+    
+    债券持仓直接保存在 assets 中，使用债券代币作为 key。
 
     Attributes:
         name: 交易者名称/标识
-        assets: 资产持仓映射 {Token: amount}
-        bonds: 债券持仓映射 {Token: amount}（正为债权，负为债务）
+        assets: 资产持仓映射 {Token: amount}（包括债券代币）
         k: 策略参数
         orders: 订单列表（包括普通订单和债券订单）
-        max_orders: 最大订单数量限制，默认10
+        max_orders: 最大订单数量限制，默认 10
         traded_pairs: 交易过的所有交易对集合
         last_bond_calc_time: 上次债券计算时间
         is_player: 是否为玩家控制
         trading_pairs: 可交易的普通交易对列表
         bond_pairs: 可交易的债券交易对列表
-        _price_converter: 价格转换函数（由Engine注入）
+        _price_converter: 价格转换函数（由 Engine 注入）
         _quote_token: 默认计价代币
 
     Examples:
@@ -61,7 +62,6 @@ class Trader(EngineNode):
         super().__init__(name)
         self.name = name
         self.assets: Dict[Token, Decimal] = {}
-        self.bonds: Dict[Token, Decimal] = {}
         self.k = D0
         self.orders: List = []
         self.max_orders: int = 10  # 最大订单数量限制
@@ -130,25 +130,33 @@ class Trader(EngineNode):
                 total += self._price_converter(token, amount, quote_token)
 
         # 累加债券债权（正债券）
-        for bond_token, bond_amount in self.bonds.items():
-            if bond_amount <= D0:
+        for token, amount in self.assets.items():
+            # 检查是否是债券代币（通过检查是否在 bond_pairs 中）
+            is_bond = False
+            for bp in self.bond_pairs:
+                if bp.base_token == token:
+                    is_bond = True
+                    break
+            
+            if not is_bond or amount <= D0:
                 continue
-            if bond_token == quote_token:
-                total += bond_amount
+            
+            if token == quote_token:
+                total += amount
             else:
-                total += self._price_converter(bond_token, bond_amount, quote_token)
+                total += self._price_converter(token, amount, quote_token)
 
         return total
 
     def get_effective_bond(self, token: Token) -> Decimal:
         """
-        计算有效债券持仓 = bonds持仓 + 订单冻结值
+        计算有效债券持仓 = assets 持仓 + 订单冻结值
 
-        对于卖单：bonds已预扣负值，加上订单冻结值（正值）相互抵消
-        例如：卖出100，bonds=-100，冻结=100，有效债券=0
+        对于卖单：assets 已预扣负值，加上订单冻结值（正值）相互抵消
+        例如：卖出 100，assets=-100，冻结=100，有效债券=0
 
-        对于买单：bonds不变，冻结资金不影响债券计算
-        例如：买入100，bonds=0，有效债券=0（成交后才变为100）
+        对于买单：assets 不变，冻结资金不影响债券计算
+        例如：买入 100，assets=0，有效债券=0（成交后才变为 100）
 
         Args:
             token: 债券代币
@@ -156,11 +164,11 @@ class Trader(EngineNode):
         Returns:
             有效债券持仓（正为债权，负为债务）
         """
-        bond_amt = self.bonds.get(token, D0)
+        bond_amt = self.assets.get(token, D0)
 
         # 加上卖单中冻结的债券值（抵消预扣的负债券）
         for order in self.orders:
-            if hasattr(order, 'bond_pair') and order.bond_pair.token == token and order.direction == "sell":
+            if hasattr(order, 'bond_pair') and order.bond_pair.base_token == token and order.direction == "sell":
                 bond_amt += order.remaining_volume
 
         return bond_amt
@@ -188,10 +196,16 @@ class Trader(EngineNode):
 
         # 累加债券债务（使用有效债券持仓）
         # 获取所有相关的债券代币
-        bond_tokens = set(self.bonds.keys())
+        bond_tokens = set()
+        for token in self.assets.keys():
+            for bp in self.bond_pairs:
+                if bp.base_token == token:
+                    bond_tokens.add(token)
+                    break
+        
         for order in self.orders:
             if hasattr(order, 'bond_pair'):
-                bond_tokens.add(order.bond_pair.token)
+                bond_tokens.add(order.bond_pair.base_token)
 
         for bond_token in bond_tokens:
             effective_bond = self.get_effective_bond(bond_token)
@@ -226,10 +240,16 @@ class Trader(EngineNode):
         liabilities = D0
 
         # 累加债券债务
-        bond_tokens = set(self.bonds.keys())
+        bond_tokens = set()
+        for token in self.assets.keys():
+            for bp in self.bond_pairs:
+                if bp.base_token == token:
+                    bond_tokens.add(token)
+                    break
+        
         for order in self.orders:
             if hasattr(order, 'bond_pair'):
-                bond_tokens.add(order.bond_pair.token)
+                bond_tokens.add(order.bond_pair.base_token)
 
         for bond_token in bond_tokens:
             effective_bond = self.get_effective_bond(bond_token)

@@ -7,6 +7,7 @@
 
 import time
 import threading
+from decimal import Decimal
 from core.engine import MarketEngine, get_engine, reset_engine
 from core.corp import Corp
 
@@ -19,77 +20,86 @@ def example_basic():
 
     # 重置引擎
     reset_engine()
-
-    # 创建引擎
-    engine = get_engine()
+    engine = MarketEngine()
 
     # 创建代币
     usdt = engine.create_token("USDT", is_quote=True)
-    eth = engine.create_token("ETH")
     btc = engine.create_token("BTC")
 
     # 创建交易对
-    eth_pair = engine.create_trading_pair("ETH", "USDT", 2000.0)
-    btc_pair = engine.create_trading_pair("BTC", "USDT", 60000.0)
-
-    # 创建债券对
-    bond_pair = engine.create_bond_trading_pair("USDT", 0.0001)
+    pair = engine.create_trading_pair("BTC", "USDT", initial_price=Decimal("50000"))
 
     # 创建交易者
-    trader1 = engine.create_trader("交易者A")
-    trader2 = engine.create_trader("交易者B")
+    trader1 = engine.create_trader("交易者 A")
+    trader2 = engine.create_trader("交易者 B")
 
-    # 分配资产
-    engine.allocate_assets(trader1, "USDT", 10000.0)
-    engine.allocate_assets(trader1, "ETH", 5.0)
-    engine.allocate_assets(trader2, "USDT", 10000.0)
-    engine.allocate_assets(trader2, "BTC", 0.5)
+    # 分配初始资产
+    engine.allocate_assets(trader1, btc, Decimal("10"))
+    engine.allocate_assets(trader1, usdt, Decimal("100000"))
+    engine.allocate_assets(trader2, btc, Decimal("10"))
+    engine.allocate_assets(trader2, usdt, Decimal("100000"))
 
-    print(f"\n交易者A初始资产: {trader1.assets}")
-    print(f"交易者B初始资产: {trader2.assets}")
+    # 进行交易
+    print("\n--- 进行交易 ---")
+    print("交易者 A 以 49000 USDT 买入 1 BTC")
+    trader1.submit_limit_order(pair, "buy", Decimal("49000"), Decimal("1"))
 
-    # 提交限价单 - 使用 Trader 的方法
-    print("\n--- 提交限价单 ---")
-    success = trader1.submit_limit_order(eth_pair, "sell", 2100.0, 2.0)
-    print(f"交易者A提交卖单(ETH @ 2100): {'成功' if success else '失败'}")
-
-    success = trader2.submit_limit_order(eth_pair, "buy", 2000.0, 1.0)
-    print(f"交易者B提交买单(ETH @ 2000): {'成功' if success else '失败'}")
+    print("交易者 B 以 49000 USDT 卖出 1 BTC")
+    trader2.submit_limit_order(pair, "sell", Decimal("49000"), Decimal("1"))
 
     # 查看订单簿
-    buys, sells = eth_pair.get_order_book()
-    print(f"\nETH/USDT 订单簿:")
-    print(f"  买单: {buys}")
-    print(f"  卖单: {sells}")
+    buys, sells = pair.get_order_book()
+    print(f"\n订单簿:")
+    print(f"  买单：{buys}")
+    print(f"  卖单：{sells}")
 
-    # 执行市价单 - 使用 Trader 的方法
-    print("\n--- 执行市价单 ---")
-    volume, details = trader2.submit_market_order(eth_pair, "buy", 1.0)
-    print(f"交易者B市价买入ETH: 成交量={volume}")
+    # 查看交易者资产
+    print(f"\n交易者 A 资产：{trader1.assets}")
+    print(f"交易者 B 资产：{trader2.assets}")
 
-    print(f"\n交易者A当前资产: {trader1.assets}")
-    print(f"交易者B当前资产: {trader2.assets}")
+    print("\n" + "=" * 50)
 
-    # 债券交易示例 - 使用 Trader 的方法
-    print("\n--- 债券交易 ---")
 
-    # 交易者A卖出债券（做空债券，相当于借出USDT）
-    success = trader1.submit_bond_limit_order(bond_pair, "sell", 0.0001, 1000.0)
-    print(f"交易者A卖出债券(做空): {'成功' if success else '失败'}")
+def example_bond_trading():
+    """债券交易示例"""
+    print("\n" + "=" * 50)
+    print("债券交易示例")
+    print("=" * 50)
 
-    # 交易者B买入债券（做多债券）
-    success = trader2.submit_bond_limit_order(bond_pair, "buy", 0.0001, 500.0)
-    print(f"交易者B买入债券(做多): {'成功' if success else '失败'}")
+    # 重置引擎
+    reset_engine()
+    engine = MarketEngine()
 
-    # 查看债券订单簿
+    # 创建 USDT 债券交易对
+    usdt = engine.create_token("USDT", is_quote=True)
+    bond_pair = engine.create_bond_trading_pair("USDT", Decimal("0.05"))
+
+    # 创建交易者
+    trader1 = engine.create_trader("交易者 A")
+    trader2 = engine.create_trader("交易者 B")
+
+    # 分配初始资产
+    engine.allocate_assets(trader1, usdt, Decimal("100000"))
+    engine.allocate_assets(trader2, usdt, Decimal("100000"))
+
+    # 进行债券交易
+    print("\n--- 进行债券交易 ---")
+    print("交易者 A 以 5% 利率借出 10000 USDT（买入债券）")
+    trader1.submit_bond_limit_order(bond_pair, "buy", Decimal("0.05"), Decimal("10000"))
+
+    print("交易者 B 以 5% 利率借入 10000 USDT（卖出债券）")
+    trader2.submit_bond_limit_order(bond_pair, "sell", Decimal("0.05"), Decimal("10000"))
+
+    # 查看订单簿
     bond_buys, bond_sells = bond_pair.get_order_book()
     print(f"\n债券订单簿:")
-    print(f"  买单: {bond_buys}")
-    print(f"  卖单: {bond_sells}")
+    print(f"  买单：{bond_buys}")
+    print(f"  卖单：{bond_sells}")
 
-    # 查看债券持仓
-    print(f"交易者A债券持仓: {trader1.bonds}")
-    print(f"交易者B债券持仓: {trader2.bonds}")
+    # 查看债券持仓（债券代币直接保存在 assets 中）
+    bond_token = bond_pair.base_token
+    print(f"交易者 A 债券持仓：{trader1.assets.get(bond_token, Decimal('0'))}")
+    print(f"交易者 B 债券持仓：{trader2.assets.get(bond_token, Decimal('0'))}")
 
     # 运行几步模拟（利息结算）
     print("\n--- 运行模拟步骤（债券利息结算）---")
@@ -97,10 +107,10 @@ def example_basic():
         engine.step()
         print(f"步骤 {i+1} 完成")
 
-    print(f"\n交易者A当前资产: {trader1.assets}")
-    print(f"交易者A债券持仓: {trader1.bonds}")
-    print(f"\n交易者B当前资产: {trader2.assets}")
-    print(f"交易者B债券持仓: {trader2.bonds}")
+    print(f"\n交易者 A 当前资产：{trader1.assets}")
+    print(f"交易者 A 债券持仓：{trader1.assets.get(bond_token, Decimal('0'))}")
+    print(f"\n交易者 B 当前资产：{trader2.assets}")
+    print(f"交易者 B 债券持仓：{trader2.assets.get(bond_token, Decimal('0'))}")
 
     print("\n" + "=" * 50)
     print("示例完成！")
@@ -108,105 +118,106 @@ def example_basic():
 
 
 def example_ipo():
-    """IPO示例 - 股份公司发行和交易"""
+    """IPO 示例 - 股份公司发行和交易"""
     print("\n" + "=" * 50)
-    print("IPO示例：股份公司发行和交易")
+    print("IPO 示例：股份公司发行和交易")
     print("=" * 50)
 
+    # 重置引擎
     reset_engine()
-    engine = get_engine()
+    engine = MarketEngine()
 
-    # 创建计价代币
+    # 创建代币和交易对
     usdt = engine.create_token("USDT", is_quote=True)
+    corp = Corp("TestCorp", engine, usdt, Decimal("100"), Decimal("1000"))
 
-    # 创建股份公司（IPO）
-    company = Corp(
-        name="TechCorp",
-        total_shares=10000,      # 发行1万股
-        initial_price=10.0,       # 每股10 USDT
-        quote_token=usdt,
-        token_id=100
-    )
+    # 创建交易者
+    trader1 = engine.create_trader("投资者 A")
+    trader2 = engine.create_trader("投资者 B")
 
-    # 获取交易对和股份代币
-    trading_pair, share_token = company.get_trading_info()
+    # 分配初始资金
+    engine.allocate_assets(trader1, usdt, Decimal("50000"))
+    engine.allocate_assets(trader2, usdt, Decimal("50000"))
 
-    print(f"\n公司: {company.name}")
-    print(f"股份代币: {share_token.name}")
-    print(f"总股本: {company.total_shares}")
-    print(f"发行价: {company.initial_price} USDT")
-    print(f"市值: {company.total_shares * company.initial_price} USDT")
+    print(f"\n公司发行 {corp.total_shares} 股，初始价格 {corp.initial_price} USDT")
+    print(f"IPO 前公司 USDT 资产：{corp.assets.get(usdt, Decimal('0'))}")
 
-    # 创建投资者
-    investor = engine.create_trader("投资者")
-    engine.allocate_assets(investor, "USDT", 50000.0)
+    # 投资者购买 IPO
+    print("\n--- 投资者购买 IPO ---")
+    print("投资者 A 购买 200 股")
+    trader1.submit_limit_order(corp.trading_pair, "buy", corp.initial_price, Decimal("200"))
 
-    print(f"\n投资者初始资金: {investor.assets.get(usdt, 0)} USDT")
+    print("投资者 B 购买 300 股")
+    trader2.submit_limit_order(corp.trading_pair, "buy", corp.initial_price, Decimal("300"))
 
-    # 投资者购买股份 - 使用 Trader 的方法
-    print("\n--- 投资者购买股份 ---")
-    volume, details = investor.submit_market_order(trading_pair, "buy", 1000.0)
-    print(f"购买股份: {volume} 股")
+    # 查看 IPO 结果
+    print(f"\nIPO 后公司 USDT 资产：{corp.assets.get(usdt, Decimal('0'))}")
+    print(f"投资者 A 资产：{trader1.assets}")
+    print(f"投资者 B 资产：{trader2.assets}")
 
-    print(f"\n公司剩余股份: {company.get_remaining_shares()}")
-    print(f"公司已募集资金: {company.get_raised_funds()} USDT")
-    print(f"投资者持有股份: {investor.assets.get(share_token, 0)}")
-    print(f"投资者剩余资金: {investor.assets.get(usdt, 0)} USDT")
-
-    # 尝试取消IPO订单（应该失败）
-    print("\n--- 尝试取消IPO订单 ---")
-    result = company.cancel_order(company.ipo_order)
-    print(f"取消IPO订单: {'成功' if result else '失败（预期）'}")
-    print(f"剩余股份: {company.get_remaining_shares()}")
+    # 查看流通股
+    print(f"\n流通股数：{corp.get_circulating_shares(engine.traders)}")
 
     print("\n" + "=" * 50)
-    print("IPO示例完成！")
-    print("=" * 50)
 
 
 def example_market_simulation():
-    """市场模拟示例 - 运行一个简单的市场模拟"""
+    """市场模拟示例 - 多线程后台模拟"""
     print("\n" + "=" * 50)
-    print("市场模拟示例")
+    print("市场模拟示例：后台模拟 + 实时交易")
     print("=" * 50)
 
+    # 重置引擎
     reset_engine()
-    engine = get_engine()
+    engine = MarketEngine()
 
-    # 创建代币
+    # 创建代币和交易对
     usdt = engine.create_token("USDT", is_quote=True)
-    eth = engine.create_token("ETH")
+    btc = engine.create_token("BTC")
+    pair = engine.create_trading_pair("BTC", "USDT", initial_price=Decimal("50000"))
 
-    # 创建交易对
-    eth_pair = engine.create_trading_pair("ETH", "USDT", 2000.0)
-
-    # 创建债券对
-    bond_pair = engine.create_bond_trading_pair("USDT", 0.0001)
-
-    # 创建几个交易者并分配资产
+    # 创建多个交易者
     traders = []
-    for i in range(3):
-        trader = engine.create_trader(f"交易者{i+1}")
-        engine.allocate_assets(trader, "USDT", 5000.0)
-        engine.allocate_assets(trader, "ETH", 2.0)
+    for i in range(5):
+        trader = engine.create_trader(f"Trader_{i}")
+        engine.allocate_assets(trader, btc, Decimal("10"))
+        engine.allocate_assets(trader, usdt, Decimal("500000"))
         traders.append(trader)
 
-    print(f"\n创建了 {len(engine.traders)} 个交易者")
-    print("运行市场模拟 3 秒...")
+    print(f"\n创建 {len(traders)} 个交易者，每个初始资产：10 BTC + 500000 USDT")
 
-    # 启动模拟线程
+    # 启动后台模拟线程
     stop_event = threading.Event()
 
-    def simulation_loop():
+    def simulate_market():
+        """后台模拟线程函数"""
         while not stop_event.is_set():
             engine.step()
-            time.sleep(0.5)
+            time.sleep(0.1)  # 每 0.1 秒执行一步
 
-    sim_thread = threading.Thread(target=simulation_loop, daemon=True)
+    sim_thread = threading.Thread(target=simulate_market, daemon=True)
     sim_thread.start()
+    print("后台模拟线程已启动")
 
-    # 运行3秒
-    time.sleep(3)
+    # 进行一些随机交易
+    print("\n--- 进行随机交易 ---")
+    import random
+    for i in range(10):
+        trader = random.choice(traders)
+        direction = random.choice(["buy", "sell"])
+        price = Decimal(str(random.randint(49000, 51000)))
+        volume = Decimal(str(random.randint(1, 5))) / Decimal("10")
+
+        try:
+            trader.submit_limit_order(pair, direction, price, volume)
+            print(f"  {trader.name} {direction} {volume} BTC @ {price} USDT")
+        except Exception as e:
+            print(f"  {trader.name} 交易失败：{e}")
+
+        time.sleep(0.05)
+
+    # 停止模拟
+    print("\n停止模拟...")
     stop_event.set()
     sim_thread.join(timeout=1.0)
 
@@ -215,8 +226,7 @@ def example_market_simulation():
     # 查看最终状态
     for trader in traders:
         print(f"\n{trader.name}:")
-        print(f"  资产: {trader.assets}")
-        print(f"  债券: {trader.bonds}")
+        print(f"  资产：{trader.assets}")
 
     print("\n" + "=" * 50)
 
@@ -225,7 +235,10 @@ if __name__ == "__main__":
     # 运行基础示例
     example_basic()
 
-    # 运行IPO示例
+    # 运行债券交易示例
+    example_bond_trading()
+
+    # 运行 IPO 示例
     example_ipo()
 
     # 运行市场模拟示例

@@ -102,7 +102,7 @@ class BondTradingPair(EngineNode):
         """
         total = D0
         for trader in traders:
-            total += trader.bonds.get(self.token, D0)
+            total += trader.assets.get(self.base_token, D0)
         return total
 
     def update_consensus_rate(self) -> None:
