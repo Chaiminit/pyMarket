@@ -288,8 +288,14 @@ class ReflexiveMarketMaker(EngineNode):
                 pair.sell_orders.remove(sell_order)
 
         if actual_base_bought > D0:
+            # 关键修复：套利交易时，RMM 池用 quote_token 购买 base_token
+            # 池子的 quote 储备减少 total_quote_paid（支付给卖家）
+            # 池子的 base 储备增加 actual_base_bought（从卖家购买）
+            # 这会导致 k 值变化，但这是正确的，因为套利是外部交易
+            pool.reserve_quote -= total_quote_paid
             pool.reserve_base += actual_base_bought
-            pool.reserve_quote = pool.k / pool.reserve_base
+            # 重新计算 k 值
+            pool.k = pool.reserve_base * pool.reserve_quote
 
             pair.price = self.get_price(pair)
             pair.update_consensus_price()
@@ -381,8 +387,14 @@ class ReflexiveMarketMaker(EngineNode):
                 pair.buy_orders.remove(buy_order)
 
         if actual_base_sold > D0:
+            # 关键修复：套利交易时，RMM 池卖出 base_token 换取 quote_token
+            # 池子的 base 储备减少 actual_base_sold（卖给买家）
+            # 池子的 quote 储备增加 total_quote_received（从买家获得）
+            # 这会导致 k 值变化，但这是正确的，因为套利是外部交易
             pool.reserve_base -= actual_base_sold
-            pool.reserve_quote = pool.k / pool.reserve_base
+            pool.reserve_quote += total_quote_received
+            # 重新计算 k 值
+            pool.k = pool.reserve_base * pool.reserve_quote
 
             pair.price = self.get_price(pair)
             pair.update_consensus_price()
