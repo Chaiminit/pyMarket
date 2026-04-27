@@ -283,6 +283,7 @@ class ReflexiveMarketMaker(EngineNode):
             remaining_to_buy -= match_volume
 
             if sell_order.remaining_volume <= D0:
+                sell_order.close()
                 if sell_order in seller.orders:
                     seller.orders.remove(sell_order)
                 pair.sell_orders.remove(sell_order)
@@ -382,6 +383,7 @@ class ReflexiveMarketMaker(EngineNode):
             remaining_to_sell -= match_volume
 
             if buy_order.remaining_volume <= D0:
+                buy_order.close()
                 if buy_order in buyer.orders:
                     buyer.orders.remove(buy_order)
                 pair.buy_orders.remove(buy_order)
