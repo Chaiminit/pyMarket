@@ -324,6 +324,26 @@ class Trader(EngineNode):
 
         return True
 
+    def submit_bond_market_order(self, bond_pair: "BondTradingPair", direction: str,
+                                  volume) -> Tuple[Decimal, List[Dict], Decimal]:
+        """
+        提交债券市价单
+
+        债券方向说明：
+        - 买单（buy）：借出资金，获得 bond_token（债权）
+        - 卖单（sell）：借入资金，付出 bond_token（债务）
+
+        Args:
+            bond_pair: 债券交易对
+            direction: 'buy' 或 'sell'
+            volume: 债券数量
+
+        Returns:
+            (实际成交量, 成交明细列表, 总手续费)
+        """
+        volume = to_decimal(volume)
+        return bond_pair.execute_market_bond_order(self, direction, volume)
+
     def cancel_order(self, order: "Order") -> bool:
         """
         取消订单

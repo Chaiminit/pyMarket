@@ -251,6 +251,137 @@ class BondTradingPair(EngineNode):
             self._match_bond_orders()
             self.update_consensus_rate()
 
+    def execute_market_bond_order(
+        self, trader: Trader, direction: str, volume
+    ) -> Tuple[Decimal, List[Dict], Decimal]:
+        """
+        执行债券市价单 - 立即以最优利率成交（线程安全）
+
+        市价单会遍历对手方订单簿，尽可能成交指定数量。
+        如果市场深度不足，只成交可成交的部分。
+
+        Args:
+            trader: 下单交易者
+            direction: 'buy' 或 'sell'
+            volume: 目标成交量
+
+        Returns:
+            (实际成交量, 成交明细列表, 总手续费)
+        """
+        volume = to_decimal(volume)
+        if volume <= D0:
+            return D0, [], D0
+
+        with self._lock:
+            executed_volume = D0
+            total_cost_or_revenue = D0
+            total_fee = D0
+            trade_details: List[Dict] = []
+
+            if direction == "buy":
+                # 市价买单：遍历卖单簿，从高利率到低利率成交
+                while volume > D0 and self.sell_orders:
+                    sell_order = self.sell_orders[0]
+                    match_volume = min(volume, sell_order.remaining_volume)
+                    match_rate = sell_order.interest_rate
+                    match_cost = match_volume
+
+                    available = trader.assets.get(self.quote_token, D0)
+                    if available < match_cost:
+                        if available > D0:
+                            match_volume = available
+                            match_cost = match_volume
+                        else:
+                            break
+
+                    # 买家支付 quote_token，获得债券代币
+                    trader.assets[self.quote_token] = available - match_cost
+                    trader.assets[self.base_token] = (
+                        trader.assets.get(self.base_token, D0) + match_volume
+                    )
+
+                    # 卖家获得 quote_token，债券代币已冻结
+                    seller = sell_order.trader
+                    sell_order.remaining_frozen -= match_volume
+                    seller.assets[self.quote_token] = (
+                        seller.assets.get(self.quote_token, D0) + match_cost
+                    )
+
+                    # 记录成交
+                    self.log.append((time.time(), match_rate, match_volume, D0, D0))
+                    self.current_rate = match_rate
+                    self.update_consensus_rate()
+
+                    trade_details.append({
+                        "rate": match_rate,
+                        "volume": match_volume,
+                        "cost": match_cost,
+                        "buyer_fee": D0,
+                        "seller_fee": D0,
+                        "counterparty": seller,
+                    })
+
+                    volume -= match_volume
+                    executed_volume += match_volume
+                    total_cost_or_revenue += match_cost
+                    sell_order.executed += match_volume
+
+                    if sell_order.remaining_volume <= D0:
+                        if sell_order in seller.bond_orders:
+                            seller.bond_orders.remove(sell_order)
+                        self.sell_orders.remove(sell_order)
+
+            else:  # sell
+                # 市价卖单：遍历买单簿，从低利率到高利率成交
+                while volume > D0 and self.buy_orders:
+                    buy_order = self.buy_orders[0]
+                    match_volume = min(volume, buy_order.remaining_volume)
+                    match_rate = buy_order.interest_rate
+                    match_revenue = match_volume
+
+                    # 市价卖单允许负持仓（债务），不需要检查余额
+
+                    # 卖家获得 quote_token，付出债券代币
+                    trader.assets[self.quote_token] = (
+                        trader.assets.get(self.quote_token, D0) + match_revenue
+                    )
+                    trader.assets[self.base_token] = (
+                        trader.assets.get(self.base_token, D0) - match_volume
+                    )
+
+                    # 买家支付 quote_token（已冻结），获得债券代币
+                    buyer = buy_order.trader
+                    buy_order.remaining_frozen -= match_volume
+                    buyer.assets[self.base_token] = (
+                        buyer.assets.get(self.base_token, D0) + match_volume
+                    )
+
+                    # 记录成交
+                    self.log.append((time.time(), match_rate, match_volume, D0, D0))
+                    self.current_rate = match_rate
+                    self.update_consensus_rate()
+
+                    trade_details.append({
+                        "rate": match_rate,
+                        "volume": match_volume,
+                        "revenue": match_revenue,
+                        "buyer_fee": D0,
+                        "seller_fee": D0,
+                        "counterparty": buyer,
+                    })
+
+                    volume -= match_volume
+                    executed_volume += match_volume
+                    total_cost_or_revenue += match_revenue
+                    buy_order.executed += match_volume
+
+                    if buy_order.remaining_volume <= D0:
+                        if buy_order in buyer.bond_orders:
+                            buyer.bond_orders.remove(buy_order)
+                        self.buy_orders.remove(buy_order)
+
+            return executed_volume, trade_details, total_fee
+
     def _match_bond_orders(self) -> None:
         """
         撮合债券订单
