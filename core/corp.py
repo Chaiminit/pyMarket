@@ -84,7 +84,7 @@ class Corp(Trader, EngineNode):
 
         self.total_shares = to_decimal(total_shares)
         self.initial_price = to_decimal(initial_price)
-        self._quote_token = quote_token
+        self.quote_token = quote_token
 
         # 创建股份代币
         self.share_token = Token(
@@ -95,7 +95,7 @@ class Corp(Trader, EngineNode):
         # 创建股份交易对
         self.trading_pair = TradingPair(
             base_token=self.share_token,
-            quote_token=quote_token,
+            quote_token=self.quote_token,
             initial_price=initial_price
         )
 

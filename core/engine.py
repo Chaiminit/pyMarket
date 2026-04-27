@@ -269,7 +269,7 @@ class MarketEngine:
         创建债券交易对
 
         Args:
-            token_id: 标的代币ID
+            token_id: 标的代币ID（如 USDT）
             initial_rate: 初始利率（年化）
             **kwargs: 传递给 bond_trading_pair_class 的额外参数
 
@@ -283,10 +283,16 @@ class MarketEngine:
         if token is None:
             raise ValueError(f"代币 {token_id} 不存在")
 
-        bond_pair = self._bond_trading_pair_class(token, initial_rate, **kwargs)
+        bond_token_id = f"BOND_{token_id}"
+        bond_pair = self._bond_trading_pair_class(token, bond_token_id, initial_rate, **kwargs)
         self.bond_trading_pairs.append(bond_pair)
         self._nodes.add(bond_pair)
         bond_pair._engine = self
+
+        # 注册债券代币到引擎
+        self.tokens[bond_pair.base_token] = bond_token_id
+        self._token_by_id[bond_token_id] = bond_pair.base_token
+
         return bond_pair
 
     def register_bond_trading_pair(self, bond_pair: BondTradingPair) -> None:

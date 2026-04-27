@@ -168,12 +168,13 @@ class LiquidationEngine:
         Returns:
             (实际使用的资产价值, 未偿还的坏账)
         """
-        token = bond_pair.token
-        bond_key = token  # 在 core 模块中直接用 Token 对象作为 key
+        base_token = bond_pair.base_token  # 债券代币
+        quote_token = bond_pair.quote_token  # 标的代币
         bankrupt_id = id(trader)
 
         # 计算有效债券持仓（持仓 + 冻结）
-        b_amt = trader.bonds.get(token, D0)
+        # 债券持仓现在在 assets 中，正数为债权，负数为债务
+        b_amt = trader.assets.get(base_token, D0)
         frozen_sell = sum(
             o.remaining_volume for o in bond_pair.sell_orders
             if id(o.trader) == bankrupt_id
@@ -186,9 +187,9 @@ class LiquidationEngine:
         if debt_amount <= D0 and credit_amount <= D0:
             return D0, D0
 
-        # 计算破产者的总资产价值（以该债券代币计价）
+        # 计算破产者的总资产价值（以标的代币计价）
         total_asset_value = self._calculate_asset_value_in_token(
-            trader, token, price_oracle
+            trader, quote_token, price_oracle
         )
 
         used_token = D0
@@ -205,7 +206,7 @@ class LiquidationEngine:
             self._forgive_debtors(trader, bond_pair, credit_amount)
 
         # 清空破产者的债券持仓
-        trader.bonds[token] = D0
+        trader.assets[base_token] = D0
 
         return used_token, bad_debt
 
@@ -251,7 +252,8 @@ class LiquidationEngine:
         Returns:
             (实际支付的资产, 坏账金额)
         """
-        token = bond_pair.token
+        base_token = bond_pair.base_token  # 债券代币
+        quote_token = bond_pair.quote_token  # 标的代币
         bankrupt_id = id(bankrupt_trader)
 
         # 收集所有债权人
@@ -262,7 +264,8 @@ class LiquidationEngine:
             if id(trader) == bankrupt_id:
                 continue
 
-            b_amt = trader.bonds.get(token, D0)
+            # 从 assets 中获取债券持仓
+            b_amt = trader.assets.get(base_token, D0)
             frozen_sell = sum(
                 o.remaining_volume for o in bond_pair.sell_orders
                 if id(o.trader) == id(trader)
@@ -276,19 +279,19 @@ class LiquidationEngine:
         if total_credit <= D0 or not creditors:
             return D0, debt_amount  # 没有债权人，全部成为坏账
 
-        # 实际可支付的金额
+        # 实际可支付的金额（以 quote_token 计价）
         actual_pay = min(available_assets, debt_amount)
         bad_debt = max(debt_amount - actual_pay, D0)
 
-        # 按比例支付给债权人
+        # 按比例支付给债权人（使用 quote_token）
         for creditor, b_amt, effective in creditors:
             ratio = effective / total_credit
-            creditor_token = actual_pay * ratio
+            creditor_payment = actual_pay * ratio
 
-            if creditor_token > D0:
-                creditor.assets[token] = creditor.assets.get(token, D0) + creditor_token
+            if creditor_payment > D0:
+                creditor.assets[quote_token] = creditor.assets.get(quote_token, D0) + creditor_payment
 
-            # 核销部分债权（对应坏账部分）
+            # 核销部分债权（对应坏账部分）- 从 assets 中扣除债券代币
             if bad_debt > D0:
                 write_off_ratio = min(debt_amount / total_credit, Decimal('1.0'))
                 write_off = effective * write_off_ratio
@@ -298,7 +301,7 @@ class LiquidationEngine:
                 frozen_write_off = write_off - bond_write_off
 
                 if bond_write_off > D0:
-                    creditor.bonds[token] = b_amt - bond_write_off
+                    creditor.assets[base_token] = b_amt - bond_write_off
 
                 # 再核销冻结的卖单债券
                 if frozen_write_off > D0:
@@ -331,7 +334,7 @@ class LiquidationEngine:
             bond_pair: 债券交易对
             credit_amount: 债权金额
         """
-        token = bond_pair.token
+        base_token = bond_pair.base_token  # 债券代币
         bankrupt_id = id(bankrupt_trader)
 
         # 收集所有债务人
@@ -342,7 +345,8 @@ class LiquidationEngine:
             if id(trader) == bankrupt_id:
                 continue
 
-            b_amt = trader.bonds.get(token, D0)
+            # 从 assets 中获取债券持仓
+            b_amt = trader.assets.get(base_token, D0)
             frozen_sell = sum(
                 o.remaining_volume for o in bond_pair.sell_orders
                 if id(o.trader) == id(trader)
@@ -356,12 +360,13 @@ class LiquidationEngine:
         if total_debt <= D0 or not debtors:
             return
 
-        # 按比例豁免债务
+        # 按比例豁免债务（增加负持仓 = 减少债务）
         forgive_ratio = min(credit_amount / total_debt, Decimal('1.0'))
 
         for debtor, b_amt, debt_val in debtors:
             forgive = min(debt_val * forgive_ratio, debt_val)
-            debtor.bonds[token] = b_amt + forgive  # 负值减少 = 债务豁免
+            # 负持仓增加 = 债务减少（豁免）
+            debtor.assets[base_token] = b_amt - forgive
 
     def _distribute_remaining_assets(
         self,

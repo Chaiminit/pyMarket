@@ -291,8 +291,8 @@ class Trader(EngineNode):
         提交债券限价单
 
         债券方向说明：
-        - 买单（buy）：借出资金，支付代币，获得正债券（债权）
-        - 卖单（sell）：借入资金，获得代币，获得负债券（债务）
+        - 买单（buy）：借出 quote_token，获得 bond_token（债权）
+        - 卖单（sell）：借入 quote_token，付出 bond_token（债务）
 
         Args:
             bond_pair: 债券交易对
@@ -307,17 +307,19 @@ class Trader(EngineNode):
         volume = to_decimal(volume)
 
         if direction == "buy":
-            available = self.assets.get(bond_pair.token, D0)
+            # 买单：借出资金，冻结 quote_token
+            available = self.assets.get(bond_pair.quote_token, D0)
 
             if available < volume:
                 return False
 
-            self.assets[bond_pair.token] = available - volume
+            self.assets[bond_pair.quote_token] = available - volume
             bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
         else:  # sell
-            # 卖单：借入资金，冻结债务额度（负债券）
-            # 成交后会获得代币和负债券（债务）
-            self.bonds[bond_pair.token] = self.bonds.get(bond_pair.token, D0) - volume
+            # 卖单：借入资金，冻结 bond_token（债券代币）
+            # 允许持仓为负（债务），所以不需要检查余额
+            available = self.assets.get(bond_pair.base_token, D0)
+            self.assets[bond_pair.base_token] = available - volume
             bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
 
         return True

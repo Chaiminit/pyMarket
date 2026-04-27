@@ -45,7 +45,9 @@ class BondTradingPair(EngineNode):
     利息结算：每步从负债券持有者收取利息，支付给正债券持有者。
 
     Attributes:
-        token: 债券标的代币
+        base_token: 债券代币（如 bond_usdt）
+        quote_token: 标的代币（如 usdt）
+        token: 标的代币（同 quote_token，向后兼容）
         current_rate: 当前市场利率
         log: 成交记录 [(timestamp, rate, volume, buyer_fee, seller_fee), ...]
         buy_orders: 债券买单列表（按利率降序）
@@ -53,22 +55,31 @@ class BondTradingPair(EngineNode):
         clients: 参与此债券市场的交易者集合
 
     Examples:
-        >>> bond_pair = BondTradingPair(usdt, 0.05)  # 5%年利率
+        >>> bond_pair = BondTradingPair(usdt, 100, 0.05)  # 5%年利率
         >>> bond_pair.submit_limit_order(trader, "buy", 0.04, 1000, 1000)
         >>> insolvent = bond_pair.settle_interest_simple(traders, dt=0.1)
     """
 
-    def __init__(self, token: Token, initial_rate
-    ):
+    def __init__(self, quote_token: Token, bond_token_id: int, initial_rate):
         """
         创建债券交易对
 
         Args:
-            token: 债券标的代币
+            quote_token: 标的代币（如 USDT）
+            bond_token_id: 债券代币的唯一标识符
             initial_rate: 初始市场利率（年化）
         """
-        super().__init__(f"{token.token_id}/{initial_rate}")
-        self.token = token
+        super().__init__(f"BOND_{quote_token.token_id}/{initial_rate}")
+        self.quote_token = quote_token
+        self.token = quote_token  # 向后兼容
+        self.bond_token_id = bond_token_id
+
+        # 创建债券代币
+        self.base_token = Token(
+            token_id=bond_token_id,
+            is_quote=False
+        )
+
         self.current_rate = to_decimal(initial_rate)
         self.consensus_rate = self.current_rate  # 共识利率（买卖盘口平均利率）
         self.log: List[Tuple[float, Decimal, Decimal, Decimal, Decimal]] = []
@@ -145,19 +156,18 @@ class BondTradingPair(EngineNode):
 
         # 分类债权人和债务人
         for trader in traders:
-            # 使用 trader 的 get_effective_bond 方法计算有效债券
-            # 有效债券 = bonds持仓 + 订单冻结值
-            effective_bond = trader.get_effective_bond(self.token)
+            # 债券持仓 = 持有的债券代币数量（正为债权，负为债务）
+            bond_holding = trader.assets.get(self.base_token, D0)
 
-            if abs(effective_bond) <= D0:
+            if abs(bond_holding) <= D0:
                 continue
 
-            if effective_bond > D0:
-                creditors.append((trader, effective_bond))
-                total_positive += effective_bond
-            elif effective_bond < D0:
-                debtors.append((trader, -effective_bond))
-                total_negative += -effective_bond
+            if bond_holding > D0:
+                creditors.append((trader, bond_holding))
+                total_positive += bond_holding
+            elif bond_holding < D0:
+                debtors.append((trader, -bond_holding))
+                total_negative += -bond_holding
 
         # 没有对手方，无需结算
         if total_positive <= D0 or total_negative <= D0:
@@ -172,30 +182,30 @@ class BondTradingPair(EngineNode):
         if total_interest <= D0:
             return insolvent_debtors
 
-        # 从债务人收取利息
+        # 从债务人收取利息（使用 quote_token，即标的代币）
         collected = D0
         for debtor, debt_amt in debtors:
             ratio = debt_amt / total_negative
             interest_to_pay = total_interest * ratio
 
-            available = debtor.assets.get(self.token, D0)
+            available = debtor.assets.get(self.quote_token, D0)
             actual_pay = min(interest_to_pay, available)
 
             if actual_pay > D0:
-                debtor.assets[self.token] -= actual_pay
+                debtor.assets[self.quote_token] -= actual_pay
                 collected += actual_pay
 
             if actual_pay < interest_to_pay:
                 shortfall = interest_to_pay - actual_pay
                 insolvent_debtors.append((debtor, shortfall))
 
-        # 将收到的利息支付给债权人
+        # 将收到的利息支付给债权人（使用 quote_token，即标的代币）
         if collected > D0:
             for creditor, credit_amt in creditors:
                 ratio = credit_amt / total_positive
                 interest_to_receive = collected * ratio
-                creditor.assets[self.token] = (
-                    creditor.assets.get(self.token, D0) + interest_to_receive
+                creditor.assets[self.quote_token] = (
+                    creditor.assets.get(self.quote_token, D0) + interest_to_receive
                 )
 
         return insolvent_debtors
@@ -280,14 +290,14 @@ class BondTradingPair(EngineNode):
                 continue
 
             # 执行债券交易
-            # 买家（买单）：借出资金，获得正债券（债权）
-            # 注意：资金已从冻结中扣除，这里只需获得正债券
-            buyer.bonds[self.token] = buyer.bonds.get(self.token, D0) + match_volume
+            # 买家（买单）：借出资金（quote_token），获得债券代币（base_token）
+            # 注意：资金已从冻结中扣除，这里只需获得债券代币
+            buyer.assets[self.base_token] = buyer.assets.get(self.base_token, D0) + match_volume
 
-            # 卖家（卖单）：借入资金，获得代币，获得负债券（债务）
-            # 注意：卖单提交时已冻结负债券，这里只需释放冻结并获得代币
-            seller.assets[self.token] = (
-                seller.assets.get(self.token, D0) + match_volume
+            # 卖家（卖单）：借入资金，获得 quote_token，付出债券代币（base_token）
+            # 注意：债券代币已从冻结中扣除，这里只需获得 quote_token
+            seller.assets[self.quote_token] = (
+                seller.assets.get(self.quote_token, D0) + match_volume
             )
 
             # 更新订单状态

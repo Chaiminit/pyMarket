@@ -220,19 +220,19 @@ class BondOrder:
 
         # 返还冻结资金/债券
         if self.direction == "buy":
-            # 买单：返还剩余的冻结代币
+            # 买单：返还剩余的冻结 quote_token
             if self.remaining_frozen > D0:
-                token = self.bond_pair.token
-                self.trader.assets[token] = (
-                    self.trader.assets.get(token, D0) + self.remaining_frozen
+                self.trader.assets[self.bond_pair.quote_token] = (
+                    self.trader.assets.get(self.bond_pair.quote_token, D0) + self.remaining_frozen
                 )
                 self.remaining_frozen = D0
         else:
-            # 卖单：返还剩余的冻结债券
-            bond_token = self.bond_pair.token
+            # 卖单：返还剩余的冻结债券代币（base_token）
             remaining_bonds = self.volume - self.executed
             if remaining_bonds > D0:
-                self.trader.bonds[bond_token] = self.trader.bonds.get(bond_token, D0) + remaining_bonds
+                self.trader.assets[self.bond_pair.base_token] = (
+                    self.trader.assets.get(self.bond_pair.base_token, D0) + remaining_bonds
+                )
 
     @property
     def remaining_volume(self) -> Decimal:
