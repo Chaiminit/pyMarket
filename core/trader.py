@@ -4,12 +4,12 @@ Trader 模块 - 交易者定义
 定义金融市场中的交易者实体，管理：
 - 资产持仓 (assets): 各代币的余额
 - 债券持仓 (bonds): 各代币的债券头寸（正为债权，负为债务）
-- 活跃订单 (orders/bond_orders): 当前挂单列表
+- 活跃订单 (orders): 当前挂单列表
 
 支持总资产和净资产的计算（按计价代币换算）。
 """
 
-from typing import Dict, List, Optional, Callable, Tuple, Any, TYPE_CHECKING
+from typing import Dict, List, Optional, Callable, Tuple, Any, Set, Union, TYPE_CHECKING
 from decimal import Decimal
 
 from .token import Token
@@ -35,8 +35,9 @@ class Trader(EngineNode):
         assets: 资产持仓映射 {Token: amount}
         bonds: 债券持仓映射 {Token: amount}（正为债权，负为债务）
         k: 策略参数
-        orders: 普通订单列表
-        bond_orders: 债券订单列表
+        orders: 订单列表（包括普通订单和债券订单）
+        max_orders: 最大订单数量限制，默认10
+        traded_pairs: 交易过的所有交易对集合
         last_bond_calc_time: 上次债券计算时间
         is_player: 是否为玩家控制
         trading_pairs: 可交易的普通交易对列表
@@ -63,7 +64,8 @@ class Trader(EngineNode):
         self.bonds: Dict[Token, Decimal] = {}
         self.k = D0
         self.orders: List = []
-        self.bond_orders: List = []
+        self.max_orders: int = 10  # 最大订单数量限制
+        self.traded_pairs: Set[Union["TradingPair", "BondTradingPair"]] = set()  # 交易过的所有交易对
         self.last_bond_calc_time: Dict[Token, float] = {}
         self.is_player = False
         self.trading_pairs: List["TradingPair"] = []
@@ -157,8 +159,8 @@ class Trader(EngineNode):
         bond_amt = self.bonds.get(token, D0)
 
         # 加上卖单中冻结的债券值（抵消预扣的负债券）
-        for order in self.bond_orders:
-            if order.bond_pair.token == token and order.direction == "sell":
+        for order in self.orders:
+            if hasattr(order, 'bond_pair') and order.bond_pair.token == token and order.direction == "sell":
                 bond_amt += order.remaining_volume
 
         return bond_amt
@@ -187,8 +189,9 @@ class Trader(EngineNode):
         # 累加债券债务（使用有效债券持仓）
         # 获取所有相关的债券代币
         bond_tokens = set(self.bonds.keys())
-        for order in self.bond_orders:
-            bond_tokens.add(order.bond_pair.token)
+        for order in self.orders:
+            if hasattr(order, 'bond_pair'):
+                bond_tokens.add(order.bond_pair.token)
 
         for bond_token in bond_tokens:
             effective_bond = self.get_effective_bond(bond_token)
@@ -224,8 +227,9 @@ class Trader(EngineNode):
 
         # 累加债券债务
         bond_tokens = set(self.bonds.keys())
-        for order in self.bond_orders:
-            bond_tokens.add(order.bond_pair.token)
+        for order in self.orders:
+            if hasattr(order, 'bond_pair'):
+                bond_tokens.add(order.bond_pair.token)
 
         for bond_token in bond_tokens:
             effective_bond = self.get_effective_bond(bond_token)
@@ -238,6 +242,15 @@ class Trader(EngineNode):
 
         # 总资产 - 2 * 负债 = 净资产 - 负债
         return total_assets - 2 * liabilities
+
+    def _check_and_trim_orders(self) -> None:
+        """
+        检查订单数量，如果超过 max_orders，则取消最旧的一个订单
+        """
+        while len(self.orders) > self.max_orders:
+            # 找到最旧的订单（按时间排序）
+            oldest_order = min(self.orders, key=lambda o: o.time)
+            oldest_order.close()
 
     # ====== 交易接口 ======
 
@@ -283,6 +296,8 @@ class Trader(EngineNode):
                 self.assets[pair.base_token] = available
                 raise
 
+        self.traded_pairs.add(pair)
+        self._check_and_trim_orders()
         return True
 
     def submit_market_order(self, pair: "TradingPair", direction: str, volume) -> Tuple[Decimal, List[Dict], Decimal]:
@@ -297,30 +312,8 @@ class Trader(EngineNode):
         Returns:
             (实际成交量, 成交明细列表, 总手续费)
         """
-        return pair.execute_market_order(self, direction, volume)
-
-    def submit_market_order_by_quote(self, pair: "TradingPair", direction: str, quote_amount) -> Tuple[Decimal, List[Dict], Decimal]:
-        """
-        提交普通市价单（按计价代币金额）
-
-        买入时：指定花费多少计价代币（如 USDT）
-        卖出时：指定期望获得多少计价代币（系统会计算需要卖出的标的代币数量）
-
-        Args:
-            pair: 交易对
-            direction: 'buy' 或 'sell'
-            quote_amount: 计价代币金额
-
-        Returns:
-            (实际成交量, 成交明细列表, 总手续费)
-        """
-        quote_amount = to_decimal(quote_amount)
-
-        if direction == "buy":
-            volume = quote_amount / pair.price
-        else:
-            volume = quote_amount / pair.price
-
+        self.traded_pairs.add(pair)
+        self._check_and_trim_orders()
         return pair.execute_market_order(self, direction, volume)
 
     def submit_bond_limit_order(self, bond_pair: "BondTradingPair", direction: str,
@@ -360,6 +353,8 @@ class Trader(EngineNode):
             self.assets[bond_pair.base_token] = available - volume
             bond_pair.submit_limit_order(self, direction, interest_rate, volume, volume)
 
+        self.traded_pairs.add(bond_pair)
+        self._check_and_trim_orders()
         return True
 
     def submit_bond_market_order(self, bond_pair: "BondTradingPair", direction: str,
@@ -379,6 +374,8 @@ class Trader(EngineNode):
         Returns:
             (实际成交量, 成交明细列表, 总手续费)
         """
+        self.traded_pairs.add(bond_pair)
+        self._check_and_trim_orders()
         volume = to_decimal(volume)
         return bond_pair.execute_market_bond_order(self, direction, volume)
 

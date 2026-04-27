@@ -139,13 +139,13 @@ class LiquidationEngine:
 
     def _cancel_all_orders(self, trader: "Trader") -> None:
         """取消交易者的所有订单"""
-        # 取消普通订单
+        # 取消所有订单（包括普通订单和债券订单）
         for order in list(trader.orders):
-            order.close(force=True)
-
-        # 取消债券订单
-        for order in list(trader.bond_orders):
-            order.close()
+            # 债券订单使用 close()，普通订单使用 close(force=True)
+            if hasattr(order, 'bond_pair'):
+                order.close()
+            else:
+                order.close(force=True)
 
     def _liquidate_bonds_for_pair(
         self,
@@ -397,7 +397,6 @@ class LiquidationEngine:
 
         # 清空订单列表
         trader.orders.clear()
-        trader.bond_orders.clear()
 
     def get_insolvent_traders(self) -> List["Trader"]:
         """

@@ -214,9 +214,9 @@ class BondOrder:
             if self in self.bond_pair.sell_orders:
                 self.bond_pair.sell_orders.remove(self)
 
-        # 从交易者债券订单列表中移除
-        if self in self.trader.bond_orders:
-            self.trader.bond_orders.remove(self)
+        # 从交易者订单列表中移除
+        if self in self.trader.orders:
+            self.trader.orders.remove(self)
 
         # 返还冻结资金/债券
         if self.direction == "buy":

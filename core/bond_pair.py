@@ -246,7 +246,7 @@ class BondTradingPair(EngineNode):
                 # 利率降序，同利率按时间升序
                 self.sell_orders.sort(key=lambda x: (-x.interest_rate, x.time))
 
-            trader.bond_orders.append(order)
+            trader.orders.append(order)
             self.clients.add(trader)
             self._match_bond_orders()
             self.update_consensus_rate()
@@ -327,8 +327,8 @@ class BondTradingPair(EngineNode):
                     sell_order.executed += match_volume
 
                     if sell_order.remaining_volume <= D0:
-                        if sell_order in seller.bond_orders:
-                            seller.bond_orders.remove(sell_order)
+                        if sell_order in seller.orders:
+                            seller.orders.remove(sell_order)
                         self.sell_orders.remove(sell_order)
 
             else:  # sell
@@ -376,8 +376,8 @@ class BondTradingPair(EngineNode):
                     buy_order.executed += match_volume
 
                     if buy_order.remaining_volume <= D0:
-                        if buy_order in buyer.bond_orders:
-                            buyer.bond_orders.remove(buy_order)
+                        if buy_order in buyer.orders:
+                            buyer.orders.remove(buy_order)
                         self.buy_orders.remove(buy_order)
 
             return executed_volume, trade_details, total_fee
@@ -445,13 +445,13 @@ class BondTradingPair(EngineNode):
 
             # 完成订单处理
             if best_buy.remaining_volume <= D0:
-                if best_buy in buyer.bond_orders:
-                    buyer.bond_orders.remove(best_buy)
+                if best_buy in buyer.orders:
+                    buyer.orders.remove(best_buy)
                 self.buy_orders.remove(best_buy)
 
             if best_sell.remaining_volume <= D0:
-                if best_sell in seller.bond_orders:
-                    seller.bond_orders.remove(best_sell)
+                if best_sell in seller.orders:
+                    seller.orders.remove(best_sell)
                 self.sell_orders.remove(best_sell)
 
     def get_order_book(self, depth: int = 10) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
