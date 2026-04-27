@@ -166,6 +166,7 @@ class TradingPair(EngineNode):
             trader.orders.append(order)
             self.clients.add(trader)
             self._match_orders()
+            self.update_consensus_price()
 
     def execute_market_order(
         self, trader: Trader, direction: str, volume
@@ -450,12 +451,3 @@ class TradingPair(EngineNode):
             "buy_value": buy_value,
             "sell_value": sell_value,
         }
-
-    def step(self, dt: Decimal) -> None:
-        """
-        市场模拟步进回调
-
-        Args:
-            dt: 时间步长（秒）
-        """
-        self.update_consensus_price()

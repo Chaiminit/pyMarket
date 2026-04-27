@@ -249,6 +249,7 @@ class BondTradingPair(EngineNode):
             trader.bond_orders.append(order)
             self.clients.add(trader)
             self._match_bond_orders()
+            self.update_consensus_rate()
 
     def _match_bond_orders(self) -> None:
         """
@@ -336,20 +337,4 @@ class BondTradingPair(EngineNode):
         sells = [(order.interest_rate, order.remaining_volume) for order in self.sell_orders[:depth]]
         return buys, sells
 
-    def step(self, dt: Decimal) -> None:
-        """
-        市场模拟步进回调
 
-        每个模拟步进时由 Engine 调用，子类可以重写此方法
-        来实现自定义的每步逻辑（如利率更新、订单检查等）。
-
-        Args:
-            dt: 时间步长（秒）
-
-        Examples:
-            >>> class MyBondTradingPair(BondTradingPair):
-            ...     def step(self, dt):
-            ...         # 每步更新市场利率
-            ...         self.update_interest_rate()
-        """
-        pass
