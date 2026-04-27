@@ -201,6 +201,44 @@ class Trader(EngineNode):
 
         return total_assets - liabilities
 
+    def get_net_assets_minus_liabilities(self, quote_token: Optional[Token] = None) -> Decimal:
+        """
+        计算净资产再减去一次负债 = 总资产 - 2 * 负债
+
+        这个指标反映了交易者在承受一次债务冲击后的净价值。
+
+        Args:
+            quote_token: 指定计价代币，默认使用 self._quote_token
+
+        Returns:
+            净资产减去负债后的价值（计价代币单位）
+        """
+        total_assets = self.get_total_assets(quote_token)
+
+        if quote_token is None:
+            quote_token = self._quote_token
+        if quote_token is None or self._price_converter is None:
+            return total_assets
+
+        liabilities = D0
+
+        # 累加债券债务
+        bond_tokens = set(self.bonds.keys())
+        for order in self.bond_orders:
+            bond_tokens.add(order.bond_pair.token)
+
+        for bond_token in bond_tokens:
+            effective_bond = self.get_effective_bond(bond_token)
+            if effective_bond < D0:
+                liability_value = abs(effective_bond)
+                if bond_token == quote_token:
+                    liabilities += liability_value
+                else:
+                    liabilities += self._price_converter(bond_token, liability_value, quote_token)
+
+        # 总资产 - 2 * 负债 = 净资产 - 负债
+        return total_assets - 2 * liabilities
+
     # ====== 交易接口 ======
 
     def submit_limit_order(self, pair: "TradingPair", direction: str, price, volume) -> bool:
