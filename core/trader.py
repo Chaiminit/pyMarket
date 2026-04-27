@@ -173,6 +173,49 @@ class Trader(EngineNode):
 
         return bond_amt
 
+    def get_effective_holding(self, token: Token) -> Decimal:
+        """
+        获取某个代币的有效持仓量 = assets 持仓 + 所有订单中的冻结量
+
+        这个方法返回交易者实际拥有的代币总量，包括：
+        1. assets 中的可用余额
+        2. 所有未成交订单中冻结的该代币数量
+
+        例如：
+        - assets 有 100 BTC，挂单卖出 30 BTC（冻结），则有效持仓 = 130 BTC
+        - assets 有 100 USDT，挂单买入 50 USDT（冻结），则有效持仓 = 150 USDT
+
+        Args:
+            token: 要查询的代币
+
+        Returns:
+            代币的有效持仓总量
+        """
+        # 基础持仓
+        holding = self.assets.get(token, D0)
+
+        # 累加所有订单中冻结的该代币
+        for order in self.orders:
+            if hasattr(order, 'remaining_frozen'):
+                # 普通订单：冻结的是 base_token（卖单）或 quote_token（买单）
+                if hasattr(order, 'pair'):
+                    if order.direction == "sell" and order.pair.base_token == token:
+                        # 卖单冻结 base_token
+                        holding += order.remaining_frozen
+                    elif order.direction == "buy" and order.pair.quote_token == token:
+                        # 买单冻结 quote_token
+                        holding += order.remaining_frozen
+                # 债券订单：冻结的是 base_token（债券代币，卖单）或 quote_token（基础代币，买单）
+                elif hasattr(order, 'bond_pair'):
+                    if order.direction == "sell" and order.bond_pair.base_token == token:
+                        # 债券卖单冻结债券代币
+                        holding += order.remaining_frozen
+                    elif order.direction == "buy" and order.bond_pair.quote_token == token:
+                        # 债券买单冻结基础代币（quote_token）
+                        holding += order.remaining_frozen
+
+        return holding
+
     def get_net_assets(self, quote_token: Optional[Token] = None) -> Decimal:
         """
         计算净资产 = 总资产 - 债券债务
