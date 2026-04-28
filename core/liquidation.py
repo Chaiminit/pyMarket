@@ -277,13 +277,15 @@ class LiquidationEngine:
                 total_credit += effective
 
         if total_credit <= D0 or not creditors:
-            return D0, debt_amount  # 没有债权人，全部成为坏账
+            return D0, debt_amount
 
-        # 实际可支付的金额（以 quote_token 计价）
-        actual_pay = min(available_assets, debt_amount)
+        bankrupt_available_quote = bankrupt_trader.assets.get(quote_token, D0)
+        actual_pay = min(available_assets, debt_amount, bankrupt_available_quote)
         bad_debt = max(debt_amount - actual_pay, D0)
 
-        # 按比例支付给债权人（使用 quote_token）
+        if actual_pay > D0:
+            bankrupt_trader.assets[quote_token] = bankrupt_available_quote - actual_pay
+
         for creditor, b_amt, effective in creditors:
             ratio = effective / total_credit
             creditor_payment = actual_pay * ratio
@@ -291,7 +293,6 @@ class LiquidationEngine:
             if creditor_payment > D0:
                 creditor.assets[quote_token] = creditor.assets.get(quote_token, D0) + creditor_payment
 
-            # 核销部分债权（对应坏账部分）- 从 assets 中扣除债券代币
             if bad_debt > D0:
                 write_off_ratio = min(debt_amount / total_credit, Decimal('1.0'))
                 write_off = effective * write_off_ratio
@@ -376,6 +377,9 @@ class LiquidationEngine:
         """
         分配剩余资产给债权人
 
+        将破产者剩余的非债券资产按比例分配给所有债权人，
+        避免资产凭空消失导致守恒律违反。
+
         Args:
             trader: 破产交易者
             creditors_paid: 已记录的偿付记录
@@ -383,9 +387,58 @@ class LiquidationEngine:
         Returns:
             分配的剩余资产价值
         """
-        # 简化处理：剩余资产留在交易者账户中
-        # 实际系统中可能会拍卖资产
-        return sum(trader.assets.values(), D0)
+        quote_token = self.engine.get_quote_token()
+
+        bond_tokens = set()
+        for bp in self.engine.bond_trading_pairs:
+            bond_tokens.add(bp.base_token)
+
+        creditors: List[Tuple["Trader", Decimal]] = []
+        total_credit = D0
+
+        for bp in self.engine.bond_trading_pairs:
+            for t in self.engine.traders:
+                if id(t) == id(trader):
+                    continue
+                b_amt = t.assets.get(bp.base_token, D0)
+                frozen_sell = sum(
+                    o.remaining_volume for o in bp.sell_orders
+                    if id(o.trader) == id(t)
+                )
+                effective = b_amt + frozen_sell
+                if effective > D0:
+                    found = False
+                    for c, _ in creditors:
+                        if id(c) == id(t):
+                            found = True
+                            break
+                    if not found:
+                        creditors.append((t, effective))
+                        total_credit += effective
+
+        total_distributed = D0
+
+        for token, amount in list(trader.assets.items()):
+            if amount <= D0:
+                continue
+            if token in bond_tokens:
+                continue
+
+            if total_credit <= D0 or not creditors:
+                trader.assets[token] = D0
+                total_distributed += amount
+                continue
+
+            for creditor, credit_amt in creditors:
+                ratio = credit_amt / total_credit
+                payment = amount * ratio
+                if payment > D0:
+                    creditor.assets[token] = creditor.assets.get(token, D0) + payment
+                    total_distributed += payment
+
+            trader.assets[token] = D0
+
+        return total_distributed
 
     def _clear_trader(self, trader: "Trader") -> None:
         """清空交易者的所有持仓"""

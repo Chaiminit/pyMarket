@@ -468,7 +468,7 @@ class MarketEngine:
         """
         转换代币价格到目标计价代币
 
-        通过查找交易对进行价格转换，支持直接交易对。
+        通过查找交易对进行价格转换，支持直接交易对和债券代币。
 
         Args:
             from_token: 源代币
@@ -486,14 +486,16 @@ class MarketEngine:
         if from_token == target_quote:
             return amount
 
-        # 查找直接交易对
         for pair in self.trading_pairs:
             if pair.base_token == from_token and pair.quote_token == target_quote:
                 return amount * pair.price
             if pair.base_token == target_quote and pair.quote_token == from_token:
                 return amount / pair.price if pair.price > D0 else D0
 
-        # 无法直接转换
+        for bp in self.bond_trading_pairs:
+            if bp.base_token == from_token and bp.quote_token == target_quote:
+                return amount
+
         return D0
 
     # ====== 市场模拟 ======

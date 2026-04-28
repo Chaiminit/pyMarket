@@ -53,8 +53,8 @@ class ReflexiveMarketMaker(EngineNode):
 
     def __init__(
         self,
-        min_fee_rate="0.00001",
-        max_fee_rate="0.001",
+        min_fee_rate="0.0001",
+        max_fee_rate="0.01",
     ):
         """
         创建反射性做市商
@@ -168,6 +168,10 @@ class ReflexiveMarketMaker(EngineNode):
         当共识价格与 AMM 池隐含价格不一致时，通过订单簿进行套利交易
         使池子储备调整，直到隐含价格等于共识价格。
 
+        套利方向：
+        - P_amm > P_c: base贵了 → 买入base → _arbitrage_buy_from_orderbook_exact
+        - P_amm < P_c: base便宜了 → 卖出base → _arbitrage_sell_from_orderbook_exact
+
         Args:
             pair: 交易对
             dt: 时间步长（秒），用于控制套利速度
@@ -178,17 +182,7 @@ class ReflexiveMarketMaker(EngineNode):
         pool = self._get_pool(pair)
         pre_consensus_price = pair.consensus_price
 
-        if pool.reserve_base <= D0 or pool.reserve_quote <= D0:
-            return {
-                "direction": "none",
-                "volume": D0,
-                "avg_price": D0,
-                "pre_consensus_price": pre_consensus_price,
-            }
-
-        exact_volume, trade_price = self._calculate_exact_arbitrage_volume(pair)
-
-        if exact_volume <= D0:
+        if pool.reserve_base <= D0 or pool.reserve_quote <= D0 or pool.k <= D0:
             return {
                 "direction": "none",
                 "volume": D0,
@@ -198,34 +192,8 @@ class ReflexiveMarketMaker(EngineNode):
 
         amm_price = self.get_price(pair)
         consensus_price = pair.consensus_price
-        price_diff = consensus_price - amm_price
 
-        target_volume = exact_volume
-
-        if price_diff > D0:
-            return self._arbitrage_sell_from_orderbook_exact(
-                pair, target_volume, trade_price, pre_consensus_price
-            )
-        else:
-            return self._arbitrage_buy_from_orderbook_exact(
-                pair, target_volume, trade_price, pre_consensus_price
-            )
-
-    def _arbitrage_buy_from_orderbook_exact(
-        self, pair, target_volume: Decimal, expected_price: Decimal, pre_consensus_price: Decimal
-    ) -> Dict[str, Decimal]:
-        """
-        AMM 精确套利：从订单簿买入 base_token
-
-        核心原理：按照恒定乘积公式更新储备，而不是简单按成交价计算。
-        当AMM买入Δbase时：
-        - 新base储备：R_b' = R_b + Δ
-        - 新quote储备：R_q' = k / R_b'（保持k不变）
-        - 实际支付的quote：R_q - R_q'
-        """
-        pool = self._get_pool(pair)
-
-        if target_volume <= D0 or not pair.sell_orders:
+        if consensus_price <= D0 or amm_price <= D0:
             return {
                 "direction": "none",
                 "volume": D0,
@@ -233,66 +201,261 @@ class ReflexiveMarketMaker(EngineNode):
                 "pre_consensus_price": pre_consensus_price,
             }
 
-        new_reserve_base = pool.reserve_base + target_volume
+        price_diff = amm_price - consensus_price
+        tolerance = consensus_price * to_decimal("0.0001")
 
-        max_quote_to_spend = pool.reserve_quote * to_decimal("0.95")
+        if abs(price_diff) <= tolerance:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
 
-        new_reserve_quote = pool.k / new_reserve_base
-        quote_needed = pool.reserve_quote - new_reserve_quote
-
-        if quote_needed > max_quote_to_spend:
-            new_reserve_quote_limited = pool.reserve_quote - max_quote_to_spend
-            new_reserve_base_limited = pool.k / new_reserve_quote_limited
-            target_volume = new_reserve_base_limited - pool.reserve_base
-            if target_volume <= D0:
+        # P_amm > P_c: base贵了，需要买入base让价格下降
+        if price_diff > D0:
+            if not pair.sell_orders:
                 return {
                     "direction": "none",
                     "volume": D0,
                     "avg_price": D0,
                     "pre_consensus_price": pre_consensus_price,
                 }
-            new_reserve_base = new_reserve_base_limited
-            quote_needed = max_quote_to_spend
+            return self._arbitrage_buy_from_orderbook_exact(pair, pre_consensus_price)
+        # P_amm < P_c: base便宜了，需要卖出base让价格上升
+        else:
+            if not pair.buy_orders:
+                return {
+                    "direction": "none",
+                    "volume": D0,
+                    "avg_price": D0,
+                    "pre_consensus_price": pre_consensus_price,
+                }
+            return self._arbitrage_sell_from_orderbook_exact(pair, pre_consensus_price)
 
+    def _simulate_buy_arbitrage(self, pair, buy_volume: Decimal, pool, best_buy_price: Decimal):
+        """
+        模拟买入套利交易后的状态
+
+        Returns:
+            (quote_needed, new_pool_price, new_consensus_price, actual_volume)
+            如果池子储备不足，new_pool_price 返回 D0
+        """
+        if buy_volume <= D0 or not pair.sell_orders:
+            return D0, D0, D0, D0
+
+        max_quote = pool.reserve_quote * to_decimal("0.95")
+
+        remaining = buy_volume
+        total_quote = D0
+        actual_volume = D0
+        last_price = D0
+
+        for order in pair.sell_orders:
+            if remaining <= D0:
+                break
+            match = min(remaining, order.remaining_volume)
+            if match <= D0:
+                continue
+            quote = match * order.price
+            if total_quote + quote > max_quote:
+                remaining_quote = max_quote - total_quote
+                if order.price > D0 and remaining_quote > D0:
+                    match = remaining_quote / order.price
+                    quote = match * order.price
+                else:
+                    break
+            total_quote += quote
+            actual_volume += match
+            remaining -= match
+            last_price = order.price
+
+        if actual_volume <= D0:
+            return D0, D0, D0, D0
+
+        new_reserve_base = pool.reserve_base + actual_volume
+        new_reserve_quote = pool.reserve_quote - total_quote
+
+        if new_reserve_base <= D0 or new_reserve_quote <= D0:
+            return total_quote, D0, D0, actual_volume
+
+        new_pool_price = new_reserve_quote / new_reserve_base
+
+        remaining_after = buy_volume
+        new_best_sell = D0
+        for order in pair.sell_orders:
+            if remaining_after <= D0:
+                new_best_sell = order.price
+                break
+            order_remaining = order.remaining_volume
+            if remaining_after < order_remaining:
+                new_best_sell = order.price
+                break
+            remaining_after -= order_remaining
+
+        if new_best_sell <= D0:
+            new_best_sell = last_price if last_price > D0 else (
+                pair.sell_orders[-1].price if pair.sell_orders else D0
+            )
+
+        if best_buy_price > D0 and new_best_sell > D0:
+            new_consensus = (best_buy_price + new_best_sell) / to_decimal("2")
+        elif new_best_sell > D0:
+            new_consensus = new_best_sell
+        elif best_buy_price > D0:
+            new_consensus = best_buy_price
+        else:
+            new_consensus = D0
+
+        return total_quote, new_pool_price, new_consensus, actual_volume
+
+    def _arbitrage_buy_from_orderbook_exact(
+        self, pair, pre_consensus_price: Decimal
+    ) -> Dict[str, Decimal]:
+        """
+        AMM 精确套利：从订单簿买入 base_token，使池子价格等于市场共识价格
+
+        触发条件：P_amm > P_c（池子价格高于市场共识价格，base贵了）
+        操作效果：买入 base → R_b↑, R_q↓ → P_amm↓
+
+        使用二分法精确求解交易量，确保 P_amm' = P_c'
+        """
+        pool = self._get_pool(pair)
+
+        if not pair.sell_orders:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 获取当前最佳买价
+        best_buy_price = pair.buy_orders[0].price if pair.buy_orders else D0
+
+        # 计算最大可买入量（受限于池子95%的quote储备）
+        max_quote = pool.reserve_quote * to_decimal("0.95")
+        total_sell_volume = sum(o.remaining_volume for o in pair.sell_orders)
+
+        # 二分法搜索范围
+        low = D0
+        high = total_sell_volume
+
+        # 先估计high上限：根据资金限制
+        quote_accum = D0
+        volume_accum = D0
+        for order in pair.sell_orders:
+            order_cost = order.remaining_volume * order.price
+            if quote_accum + order_cost > max_quote:
+                # 在这个订单内达到限制
+                remaining_quote = max_quote - quote_accum
+                if order.price > D0:
+                    volume_accum += remaining_quote / order.price
+                break
+            quote_accum += order_cost
+            volume_accum += order.remaining_volume
+        high = min(high, volume_accum)
+
+        if high <= D0:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 二分法搜索精确交易量
+        target_volume = D0
+        target_quote = D0
+        iterations = 20  # 足够精度
+
+        for _ in range(iterations):
+            mid = (low + high) / to_decimal("2")
+            if mid <= D0:
+                break
+
+            quote_needed, pool_price, consensus_price, _ = self._simulate_buy_arbitrage(
+                pair, mid, pool, best_buy_price
+            )
+
+            if pool_price <= D0 or consensus_price <= D0:
+                high = mid
+                continue
+
+            # 误差 = 池子价格 - 共识价格
+            # 我们希望池子价格 <= 共识价格（买入后价格下降）
+            error = pool_price - consensus_price
+
+            if error > D0:
+                # 池子价格还太高，需要买入更多
+                low = mid
+            else:
+                # 池子价格已经低于或等于共识价格
+                high = mid
+                target_volume = mid
+                target_quote = quote_needed
+
+        if target_volume <= D0:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 执行实际交易
         remaining_to_buy = target_volume
         total_quote_paid = D0
         actual_base_bought = D0
+        orders_to_remove = []
 
-        while remaining_to_buy > D0 and pair.sell_orders:
-            sell_order = pair.sell_orders[0]
-            match_volume = min(remaining_to_buy, sell_order.remaining_volume)
-            match_price = sell_order.price
+        for order in pair.sell_orders:
+            if remaining_to_buy <= D0:
+                break
 
+            match_volume = min(remaining_to_buy, order.remaining_volume)
+            if match_volume <= D0:
+                continue
+
+            match_price = order.price
             quote_paid = match_volume * match_price
 
-            available_quote = pool.reserve_quote - total_quote_paid
-            if quote_paid > available_quote:
-                match_volume = available_quote / match_price
-                if match_volume <= D0:
-                    break
-                quote_paid = match_volume * match_price
+            seller = order.trader
 
-            seller = sell_order.trader
+            # 将 quote 从池子转给卖家
             seller.assets[pair.quote_token] = seller.assets.get(pair.quote_token, D0) + quote_paid
 
-            sell_order.executed += match_volume
-            sell_order.remaining_frozen -= match_volume
+            # 更新订单状态
+            order.executed += match_volume
+            order.remaining_frozen -= match_volume
 
             total_quote_paid += quote_paid
             actual_base_bought += match_volume
             remaining_to_buy -= match_volume
 
-            if sell_order.remaining_volume <= D0:
-                if sell_order in seller.orders:
-                    seller.orders.remove(sell_order)
-                pair.sell_orders.remove(sell_order)
+            if order.remaining_volume <= D0:
+                orders_to_remove.append(order)
+
+        # 清理已完成的订单
+        for order in orders_to_remove:
+            seller = order.trader
+            if order in seller.orders:
+                seller.orders.remove(order)
+            if order in pair.sell_orders:
+                pair.sell_orders.remove(order)
 
         if actual_base_bought > D0:
-            # RMM 套利：RMM 池用 USDT 购买 base_token（外部交易，会改变 k 值）
-            # 资金流向：RMM 池 USDT → 卖家，卖家 base_token → RMM 池
+            if pool.reserve_quote - total_quote_paid <= D0:
+                return {
+                    "direction": "none",
+                    "volume": D0,
+                    "avg_price": D0,
+                    "pre_consensus_price": pre_consensus_price,
+                }
+
             pool.reserve_base += actual_base_bought
             pool.reserve_quote -= total_quote_paid
-            pool.k = pool.reserve_base * pool.reserve_quote  # k 值改变
+            pool.k = pool.reserve_base * pool.reserve_quote
 
             pair.price = self.get_price(pair)
             pair.update_consensus_price()
@@ -313,21 +476,95 @@ class ReflexiveMarketMaker(EngineNode):
             "pre_consensus_price": pre_consensus_price,
         }
 
+    def _simulate_sell_arbitrage(self, pair, sell_volume: Decimal, pool, best_sell_price: Decimal):
+        """
+        模拟卖出套利交易后的状态
+
+        Returns:
+            (quote_received, new_pool_price, new_consensus_price, actual_volume)
+            如果池子储备不足，new_pool_price 返回 D0
+        """
+        if sell_volume <= D0 or not pair.buy_orders:
+            return D0, D0, D0, D0
+
+        max_base = pool.reserve_base * to_decimal("0.95")
+
+        remaining = sell_volume
+        total_quote = D0
+        actual_volume = D0
+        last_price = D0
+
+        for order in pair.buy_orders:
+            if remaining <= D0:
+                break
+            match = min(remaining, order.remaining_volume)
+            if match <= D0:
+                continue
+            if actual_volume + match > max_base:
+                match = max_base - actual_volume
+                if match <= D0:
+                    break
+                quote = match * order.price
+            else:
+                quote = match * order.price
+            total_quote += quote
+            actual_volume += match
+            remaining -= match
+            last_price = order.price
+
+        if actual_volume <= D0:
+            return D0, D0, D0, D0
+
+        new_reserve_base = pool.reserve_base - actual_volume
+        new_reserve_quote = pool.reserve_quote + total_quote
+
+        if new_reserve_base <= D0 or new_reserve_quote <= D0:
+            return total_quote, D0, D0, actual_volume
+
+        new_pool_price = new_reserve_quote / new_reserve_base
+
+        remaining_after = sell_volume
+        new_best_buy = D0
+        for order in pair.buy_orders:
+            if remaining_after <= D0:
+                new_best_buy = order.price
+                break
+            order_remaining = order.remaining_volume
+            if remaining_after < order_remaining:
+                new_best_buy = order.price
+                break
+            remaining_after -= order_remaining
+
+        if new_best_buy <= D0:
+            new_best_buy = last_price if last_price > D0 else (
+                pair.buy_orders[-1].price if pair.buy_orders else D0
+            )
+
+        if new_best_buy > D0 and best_sell_price > D0:
+            new_consensus = (new_best_buy + best_sell_price) / to_decimal("2")
+        elif new_best_buy > D0:
+            new_consensus = new_best_buy
+        elif best_sell_price > D0:
+            new_consensus = best_sell_price
+        else:
+            new_consensus = D0
+
+        return total_quote, new_pool_price, new_consensus, actual_volume
+
     def _arbitrage_sell_from_orderbook_exact(
-        self, pair, target_volume: Decimal, expected_price: Decimal, pre_consensus_price: Decimal
+        self, pair, pre_consensus_price: Decimal
     ) -> Dict[str, Decimal]:
         """
-        AMM 精确套利：向订单簿卖出 base_token
+        AMM 精确套利：向订单簿卖出 base_token，使池子价格等于市场共识价格
 
-        核心原理：按照恒定乘积公式更新储备。
-        当AMM卖出Δbase时：
-        - 新base储备：R_b' = R_b - Δ
-        - 新quote储备：R_q' = k / R_b'（保持k不变）
-        - 实际获得的quote：R_q' - R_q
+        触发条件：P_amm < P_c（池子价格低于市场共识价格，base便宜了）
+        操作效果：卖出 base → R_b↓, R_q↑ → P_amm↑
+
+        使用二分法精确求解交易量，确保 P_amm' = P_c'
         """
         pool = self._get_pool(pair)
 
-        if target_volume <= D0 or not pair.buy_orders:
+        if not pair.buy_orders:
             return {
                 "direction": "none",
                 "volume": D0,
@@ -335,21 +572,18 @@ class ReflexiveMarketMaker(EngineNode):
                 "pre_consensus_price": pre_consensus_price,
             }
 
-        new_reserve_base = pool.reserve_base - target_volume
+        # 获取当前最佳卖价
+        best_sell_price = pair.sell_orders[0].price if pair.sell_orders else D0
 
-        if new_reserve_base <= D0:
-            new_reserve_base = pool.reserve_base * to_decimal("0.05")
-            target_volume = pool.reserve_base - new_reserve_base
+        # 计算最大可卖出量（受限于池子95%的base储备和订单簿深度）
+        max_base = pool.reserve_base * to_decimal("0.95")
+        total_buy_volume = sum(o.remaining_volume for o in pair.buy_orders)
 
-        max_base_to_sell = pool.reserve_base * to_decimal("0.95")
-        if target_volume > max_base_to_sell:
-            target_volume = max_base_to_sell
-            new_reserve_base = pool.reserve_base - target_volume
+        # 二分法搜索范围
+        low = D0
+        high = min(max_base, total_buy_volume)
 
-        new_reserve_quote = pool.k / new_reserve_base
-        quote_to_receive = new_reserve_quote - pool.reserve_quote
-
-        if quote_to_receive <= D0:
+        if high <= D0:
             return {
                 "direction": "none",
                 "volume": D0,
@@ -357,38 +591,98 @@ class ReflexiveMarketMaker(EngineNode):
                 "pre_consensus_price": pre_consensus_price,
             }
 
+        # 二分法搜索精确交易量
+        target_volume = D0
+        target_quote = D0
+        iterations = 20  # 足够精度
+
+        for _ in range(iterations):
+            mid = (low + high) / to_decimal("2")
+            if mid <= D0:
+                break
+
+            quote_received, pool_price, consensus_price, _ = self._simulate_sell_arbitrage(
+                pair, mid, pool, best_sell_price
+            )
+
+            if pool_price <= D0 or consensus_price <= D0:
+                high = mid
+                continue
+
+            # 误差 = 池子价格 - 共识价格
+            # 我们希望池子价格 >= 共识价格（卖出后价格上升）
+            error = pool_price - consensus_price
+
+            if error < D0:
+                # 池子价格还太低，需要卖出更多
+                low = mid
+            else:
+                # 池子价格已经高于或等于共识价格
+                high = mid
+                target_volume = mid
+                target_quote = quote_received
+
+        if target_volume <= D0:
+            return {
+                "direction": "none",
+                "volume": D0,
+                "avg_price": D0,
+                "pre_consensus_price": pre_consensus_price,
+            }
+
+        # 执行实际交易
         remaining_to_sell = target_volume
         total_quote_received = D0
         actual_base_sold = D0
+        orders_to_remove = []
 
-        while remaining_to_sell > D0 and pair.buy_orders:
-            buy_order = pair.buy_orders[0]
-            match_volume = min(remaining_to_sell, buy_order.remaining_volume)
-            match_price = buy_order.price
+        for order in pair.buy_orders:
+            if remaining_to_sell <= D0:
+                break
 
+            match_volume = min(remaining_to_sell, order.remaining_volume)
+            if match_volume <= D0:
+                continue
+
+            match_price = order.price
             quote_received = match_volume * match_price
 
-            buyer = buy_order.trader
+            buyer = order.trader
+
+            # 将 base_token 转给买家
             buyer.assets[pair.base_token] = buyer.assets.get(pair.base_token, D0) + match_volume
 
-            buy_order.executed += match_volume
-            buy_order.remaining_frozen -= quote_received
+            # 从买家获得冻结的 quote
+            order.executed += match_volume
+            order.remaining_frozen -= quote_received
 
             total_quote_received += quote_received
             actual_base_sold += match_volume
             remaining_to_sell -= match_volume
 
-            if buy_order.remaining_volume <= D0:
-                if buy_order in buyer.orders:
-                    buyer.orders.remove(buy_order)
-                pair.buy_orders.remove(buy_order)
+            if order.remaining_volume <= D0:
+                orders_to_remove.append(order)
+
+        # 清理已完成的订单
+        for order in orders_to_remove:
+            buyer = order.trader
+            if order in buyer.orders:
+                buyer.orders.remove(order)
+            if order in pair.buy_orders:
+                pair.buy_orders.remove(order)
 
         if actual_base_sold > D0:
-            # RMM 套利：RMM 池卖出 base_token 换取 USDT（外部交易，会改变 k 值）
-            # 资金流向：RMM 池 base_token → 买家，买家 USDT(冻结) → RMM 池
+            if pool.reserve_base - actual_base_sold <= D0:
+                return {
+                    "direction": "none",
+                    "volume": D0,
+                    "avg_price": D0,
+                    "pre_consensus_price": pre_consensus_price,
+                }
+
             pool.reserve_base -= actual_base_sold
             pool.reserve_quote += total_quote_received
-            pool.k = pool.reserve_base * pool.reserve_quote  # k 值改变
+            pool.k = pool.reserve_base * pool.reserve_quote
 
             pair.price = self.get_price(pair)
             pair.update_consensus_price()
@@ -437,23 +731,24 @@ class ReflexiveMarketMaker(EngineNode):
         if volume <= D0:
             return D0, [], D0
 
+        if pool.reserve_base <= D0 or pool.reserve_quote <= D0 or pool.k <= D0:
+            return D0, [], D0
+
         trade_details = []
         total_fee = D0
         executed_volume = D0
 
         if direction == "buy":
-            # 使用传入的 volume 计算需要的 quote，而不是用交易者的全部资产
-            # volume 是目标 base_token 数量
             max_base = min(volume, pool.reserve_base * to_decimal("0.95"))
-            
+
             if max_base <= D0:
                 return D0, [], D0
-            
+
             # 计算购买 max_base 需要多少 quote
             new_reserve_base = pool.reserve_base - max_base
             new_reserve_quote = pool.k / new_reserve_base
             quote_needed = new_reserve_quote - pool.reserve_quote
-            
+
             # 检查交易者是否有足够的 quote
             available_quote = trader.assets.get(pair.quote_token, D0)
             if available_quote < quote_needed:
@@ -475,7 +770,7 @@ class ReflexiveMarketMaker(EngineNode):
             pool.reserve_quote = pool.reserve_quote + quote_needed
 
             pair.price = self.get_price(pair)
-            pair.update_consensus_price()
+            pair.consensus_price = pair.price
 
             pair.log.append((time.time(), pair.price, max_base, D0, D0))
 
@@ -493,10 +788,10 @@ class ReflexiveMarketMaker(EngineNode):
         else:  # sell
             # 使用传入的 volume，而不是交易者的全部资产
             max_sell = min(volume, pool.reserve_base * to_decimal("0.95"))
-            
+
             if max_sell <= D0:
                 return D0, [], D0
-            
+
             # 检查交易者是否有足够的 base
             available_base = trader.assets.get(pair.base_token, D0)
             if available_base < max_sell:
@@ -520,7 +815,7 @@ class ReflexiveMarketMaker(EngineNode):
             pool.reserve_quote = pool.reserve_quote - quote_received
 
             pair.price = self.get_price(pair)
-            pair.update_consensus_price()
+            pair.consensus_price = pair.price
 
             pair.log.append((time.time(), pair.price, max_sell, D0, D0))
 
@@ -562,7 +857,7 @@ class ReflexiveMarketMaker(EngineNode):
 
         # 检查是否有套利发生
         has_arbitrage = arbitrage_result.get("direction") != "none"
-        
+
         if has_arbitrage:
             # 有套利时，根据滑点计算手续费
             volume = arbitrage_result.get("volume", D0)
@@ -601,7 +896,7 @@ class ReflexiveMarketMaker(EngineNode):
         amm_price = self.get_price(pair)
         if amm_price <= D0:
             return
-        
+
         # 手续费按 50/50 由买卖双方分担，但按 AMM 价格换算
         # 买家付 base_token，卖家付 quote_token
         fee_value_each = total_fee_quote / to_decimal("2")  # 每人承担一半价值
@@ -707,7 +1002,7 @@ class ReflexiveMarketMaker(EngineNode):
         amm_price = self.get_price(pair)
         if amm_price <= D0:
             return
-        
+
         # 手续费按成交比例分配给 taker 和 makers
         taker_share = taker_volume / total_participants_volume
 
@@ -717,22 +1012,22 @@ class ReflexiveMarketMaker(EngineNode):
             # Taker (买家) 付 base_token
             taker_fee_value = total_fee_quote * taker_share / to_decimal("2")
             taker_fee_base = taker_fee_value / amm_price
-            
+
             taker_current_base = taker.assets.get(pair.base_token, D0)
             if taker_current_base >= taker_fee_base:
                 taker.assets[pair.base_token] = taker_current_base - taker_fee_base
             else:
                 taker_fee_base = taker_current_base
                 taker.assets[pair.base_token] = D0
-            
+
             if taker_fee_base > D0:
                 pool.reserve_base += taker_fee_base
-            
+
             # Makers (卖家) 付 quote_token
             for counterparty, cp_volume in counterparties:
                 cp_share = cp_volume / total_participants_volume
                 cp_fee_value = total_fee_quote * cp_share / to_decimal("2")
-                
+
                 cp_current_quote = counterparty.assets.get(pair.quote_token, D0)
                 if cp_current_quote >= cp_fee_value:
                     counterparty.assets[pair.quote_token] = cp_current_quote - cp_fee_value
@@ -743,23 +1038,23 @@ class ReflexiveMarketMaker(EngineNode):
         else:
             # Taker (卖家) 付 quote_token
             taker_fee_value = total_fee_quote * taker_share / to_decimal("2")
-            
+
             taker_current_quote = taker.assets.get(pair.quote_token, D0)
             if taker_current_quote >= taker_fee_value:
                 taker.assets[pair.quote_token] = taker_current_quote - taker_fee_value
             else:
                 taker_fee_value = taker_current_quote
                 taker.assets[pair.quote_token] = D0
-            
+
             if taker_fee_value > D0:
                 pool.reserve_quote += taker_fee_value
-            
+
             # Makers (买家) 付 base_token
             for counterparty, cp_volume in counterparties:
                 cp_share = cp_volume / total_participants_volume
                 cp_fee_value = total_fee_quote * cp_share / to_decimal("2")
                 cp_fee_base = cp_fee_value / amm_price
-                
+
                 cp_current_base = counterparty.assets.get(pair.base_token, D0)
                 if cp_current_base >= cp_fee_base:
                     counterparty.assets[pair.base_token] = cp_current_base - cp_fee_base
